@@ -1,7 +1,12 @@
 """Giao diện chính (PySide6) của Trợ Lý Quyết Toán RPA.
 
-Gồm 5 vùng: cấu hình, mở trợ lý, file output hiện tại, duyệt dữ liệu, lịch sử/log.
-Xử lý toàn bộ button handler, nhận tín hiệu từ watcher và cập nhật giao diện.
+Bố cục 2 mục điều hướng bên trái:
+    - "Chức năng": luồng làm việc 2 bước cho người dùng phổ thông (mở trợ lý ->
+      file tự mở trong Excel kèm popup hướng dẫn -> đánh dấu đã kiểm tra xong).
+    - "Cài đặt": đường dẫn/thư mục, lịch sử xử lý và nhật ký.
+
+Toàn bộ logic nghiệp vụ (watcher, database, đọc excel, thao tác file) giữ
+nguyên; file này chỉ lo phần hiển thị và nối các handler với giao diện.
 """
 
 from __future__ import annotations
@@ -12,53 +17,54 @@ import subprocess
 from typing import Any, Dict, Optional
 
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QFileDialog,
+    QFrame,
     QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
-    QSplitter,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from . import excel_preview, file_utils
+from . import file_utils
 from .config import AppConfig
 from .database import Database
 from .watcher import DownloadWatcher
 
-# Nhãn tiếng Việt cho từng trạng thái.
+# Nhãn tiếng Việt cho từng trạng thái (không kèm mã kỹ thuật cho dễ hiểu).
 STATUS_LABELS = {
     "WAITING_FOR_DOWNLOAD": "Đang chờ tải file output",
     "DOWNLOADED": "Đã tải về",
     "READY_FOR_REVIEW": "Sẵn sàng để kiểm tra",
     "OPENED_FOR_REVIEW": "Đang mở để kiểm tra",
     "REVIEW_SAVED": "Đã lưu sau khi chỉnh sửa",
+    "COMPLETED": "Đã kiểm tra & hoàn tất",
+    # Các trạng thái cũ (giữ để hiển thị lại lịch sử từ phiên bản trước).
     "REVIEW_CONFIRMED": "Đã xác nhận dùng file này",
     "READY_TO_PREVIEW": "Sẵn sàng duyệt dữ liệu",
     "PREVIEWED": "Đã duyệt dữ liệu",
     "ERROR": "Lỗi",
 }
 
-# Các trạng thái coi như đã được người dùng xác nhận (cho phép duyệt dữ liệu).
-CONFIRMED_STATUSES = {"REVIEW_CONFIRMED", "READY_TO_PREVIEW", "PREVIEWED"}
 
-
-def status_text(status: Optional[str]) -> str:
+def friendly_status(status: Optional[str]) -> str:
+    """Trả về nhãn tiếng Việt thuần cho trạng thái (không hiện mã)."""
     if not status:
         return "—"
-    return f"{STATUS_LABELS.get(status, status)} ({status})"
+    return STATUS_LABELS.get(status, status)
 
 
 # ---------------------------------------------------------------------------
@@ -96,10 +102,10 @@ class MainWindow(QMainWindow):
         # Trạng thái vận hành.
         self.overall_status: str = "WAITING_FOR_DOWNLOAD"
         self.current_working_file: Optional[Dict[str, Any]] = None
-        self.current_reviewed_file: Optional[str] = None
 
         self.setWindowTitle("Trợ Lý Quyết Toán RPA")
-        self.resize(1080, 820)
+        self.resize(1120, 800)
+        self.setMinimumSize(960, 640)
 
         self._build_ui()
         self._setup_log_bridge()
@@ -118,173 +124,274 @@ class MainWindow(QMainWindow):
     # ================================================================== #
     def _build_ui(self) -> None:
         central = QWidget()
+        central.setObjectName("appRoot")
         self.setCentralWidget(central)
-        outer = QVBoxLayout(central)
 
+        row = QHBoxLayout(central)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+
+        self.stack = QStackedWidget()
+        self.stack.setObjectName("content")
+
+        sidebar = self._build_sidebar()
+        self.stack.addWidget(self._build_function_page())
+        self.stack.addWidget(self._build_settings_page())
+
+        row.addWidget(sidebar)
+        row.addWidget(self.stack, stretch=1)
+
+        self.nav.setCurrentRow(0)
+        self._update_current_file_labels()
+
+    # ---- Thanh điều hướng bên trái ---------------------------------- #
+    def _build_sidebar(self) -> QWidget:
+        panel = QWidget()
+        panel.setObjectName("sidebar")
+        panel.setFixedWidth(214)
+
+        v = QVBoxLayout(panel)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        title = QLabel("Trợ Lý Quyết Toán")
+        title.setObjectName("appTitle")
+        title.setWordWrap(True)
+        subtitle = QLabel("RPA hỗ trợ quyết toán")
+        subtitle.setObjectName("appSubtitle")
+        v.addWidget(title)
+        v.addWidget(subtitle)
+
+        self.nav = QListWidget()
+        self.nav.setObjectName("navList")
+        self.nav.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        QListWidgetItem("Chức năng", self.nav)
+        QListWidgetItem("Cài đặt", self.nav)
+        self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
+        v.addWidget(self.nav)
+
+        v.addStretch(1)
+        footer = QLabel("Phiên bản 1.0")
+        footer.setObjectName("navFooter")
+        v.addWidget(footer)
+
+        return panel
+
+    # ---- Tiện ích dựng UI ------------------------------------------- #
+    def _card(self, title: str) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("card")
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(18, 16, 18, 18)
+        lay.setSpacing(10)
+        lbl = QLabel(title)
+        lbl.setObjectName("cardTitle")
+        lay.addWidget(lbl)
+        return frame
+
+    def _make_button(
+        self,
+        text: str,
+        handler,
+        variant: Optional[str] = None,
+        big: bool = False,
+    ) -> QPushButton:
+        btn = QPushButton(text)
+        btn.setCursor(Qt.PointingHandCursor)
+        if handler is not None:
+            btn.clicked.connect(handler)
+        if variant:
+            btn.setProperty("variant", variant)
+        if big:
+            btn.setObjectName("bigButton")
+        return btn
+
+    def _scroll_page(self) -> tuple[QScrollArea, QVBoxLayout]:
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        outer.addWidget(scroll)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        page = QWidget()
+        page.setObjectName("page")
+        scroll.setWidget(page)
+        v = QVBoxLayout(page)
+        v.setContentsMargins(24, 24, 24, 24)
+        v.setSpacing(16)
+        return scroll, v
 
-        container = QWidget()
-        scroll.setWidget(container)
-        layout = QVBoxLayout(container)
-        layout.setSpacing(10)
+    # ---- Trang "Chức năng" ------------------------------------------ #
+    def _build_function_page(self) -> QScrollArea:
+        scroll, v = self._scroll_page()
 
-        layout.addWidget(self._build_config_group())
-        layout.addWidget(self._build_open_assistant_group())
-        layout.addWidget(self._build_current_file_group())
-        layout.addWidget(self._build_preview_group())
-        layout.addWidget(self._build_history_group(), stretch=1)
+        # --- Bước 1: mở trợ lý ---
+        card1 = self._card("1  ·  Mở trợ lý quyết toán")
+        hint1 = QLabel(
+            "Bấm nút bên dưới để khởi động trợ lý, gửi dữ liệu lên GPT rồi tải "
+            "file output về. Phần mềm sẽ tự phát hiện file mới."
+        )
+        hint1.setObjectName("cardHint")
+        hint1.setWordWrap(True)
+        card1.layout().addWidget(hint1)
 
-    # ---- Vùng 1: Cấu hình ------------------------------------------- #
-    def _build_config_group(self) -> QGroupBox:
-        box = QGroupBox("1. Cấu hình")
-        grid = QGridLayout(box)
+        self.btn_open_assistant = self._make_button(
+            "Mở trợ lý quyết toán",
+            self.on_open_assistant,
+            variant="primary",
+            big=True,
+        )
+        card1.layout().addWidget(self.btn_open_assistant)
+
+        self.lbl_overall_status = QLabel("Sẵn sàng.")
+        self.lbl_overall_status.setObjectName("statusText")
+        self.lbl_overall_status.setWordWrap(True)
+        card1.layout().addWidget(self.lbl_overall_status)
+        v.addWidget(card1)
+
+        # --- Bước 2: kiểm tra & hoàn tất ---
+        card2 = self._card("2  ·  Kiểm tra & hoàn tất file kết quả")
+        hint2 = QLabel(
+            "Bạn có thể tải file mới từ trợ lý hoặc chọn một file có sẵn mà không "
+            "cần chạy Bước 1. Hãy kiểm tra, lưu và đóng file, rồi bấm “Đã kiểm tra "
+            "xong”. Phần mềm sẽ sao chép một bản vào Output và giữ nguyên file gốc."
+        )
+        hint2.setObjectName("cardHint")
+        hint2.setWordWrap(True)
+        card2.layout().addWidget(hint2)
+        self.lbl_file_name = QLabel("Chưa có file kết quả")
+        self.lbl_file_name.setObjectName("fileName")
+        self.lbl_file_name.setWordWrap(True)
+        self.lbl_file_name.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.lbl_file_status = QLabel("—")
+        self.lbl_file_status.setObjectName("metaText")
+        self.lbl_file_status.setWordWrap(True)
+        self.lbl_file_detected = QLabel("")
+        self.lbl_file_detected.setObjectName("metaText")
+        self.lbl_file_note = QLabel("")
+        self.lbl_file_note.setObjectName("noteText")
+        self.lbl_file_note.setWordWrap(True)
+
+        card2.layout().addWidget(self.lbl_file_name)
+        card2.layout().addWidget(self.lbl_file_status)
+        card2.layout().addWidget(self.lbl_file_detected)
+        card2.layout().addWidget(self.lbl_file_note)
+
+        row2 = QHBoxLayout()
+        self.btn_select_existing = self._make_button(
+            "Chọn file có sẵn",
+            self.on_select_existing_file,
+        )
+        self.btn_open_result = self._make_button(
+            "Mở lại file",
+            self.on_open_result_file,
+        )
+        self.btn_open_containing = self._make_button(
+            "Mở thư mục chứa file",
+            self.on_open_containing_folder,
+        )
+        self.btn_mark_done = self._make_button(
+            "Đã kiểm tra xong",
+            self.on_mark_done,
+            variant="success",
+        )
+        # Nút phụ ở bên trái, nút "Đã kiểm tra xong" đẩy ra ngoài cùng bên phải.
+        row2.addWidget(self.btn_select_existing)
+        row2.addWidget(self.btn_open_result)
+        row2.addWidget(self.btn_open_containing)
+        row2.addStretch(1)
+        row2.addWidget(self.btn_mark_done)
+        card2.layout().addLayout(row2)
+        v.addWidget(card2)
+
+        v.addStretch(1)
+        return scroll
+
+    # ---- Trang "Cài đặt" -------------------------------------------- #
+    def _build_settings_page(self) -> QScrollArea:
+        scroll, v = self._scroll_page()
+
+        # --- Đường dẫn & thư mục ---
+        cfg = self._card("Đường dẫn & thư mục")
+        cfg_hint = QLabel(
+            "Cài đặt một lần khi bắt đầu dùng. Sau khi sửa, bấm “Lưu cấu hình”."
+        )
+        cfg_hint.setObjectName("cardHint")
+        cfg_hint.setWordWrap(True)
+        cfg.layout().addWidget(cfg_hint)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
 
         self.edit_bat = QLineEdit(self.config.bat_path)
         self.edit_download = QLineEdit(self.config.download_folder)
         self.edit_output = QLineEdit(self.config.output_folder)
-        self.edit_backup = QLineEdit(self.config.backup_folder)
         self.edit_daily = QLineEdit(self.config.daily_tracking_file)
 
         rows = [
-            ("Đường dẫn file .bat:", self.edit_bat, self._browse_bat),
-            ("Thư mục download:", self.edit_download, self._browse_download),
-            ("Thư mục output (file làm việc):", self.edit_output, self._browse_output),
-            ("Thư mục backup (bản gốc):", self.edit_backup, self._browse_backup),
+            ("File .bat mở trợ lý:", self.edit_bat, self._browse_bat),
+            ("Thư mục download (file tải về):", self.edit_download, self._browse_download),
+            ("Thư mục output (bản đã kiểm tra):", self.edit_output, self._browse_output),
             ("File theo dõi hàng ngày:", self.edit_daily, self._browse_daily),
         ]
         for r, (label, edit, handler) in enumerate(rows):
-            grid.addWidget(QLabel(label), r, 0)
+            lbl = QLabel(label)
+            lbl.setObjectName("formLabel")
+            grid.addWidget(lbl, r, 0)
             grid.addWidget(edit, r, 1)
-            btn = QPushButton("Chọn...")
-            btn.clicked.connect(handler)
+            btn = self._make_button("Chọn…", handler)
+            btn.setFixedWidth(96)
             grid.addWidget(btn, r, 2)
+        grid.setColumnStretch(1, 1)
+        cfg.layout().addLayout(grid)
 
         btn_row = QHBoxLayout()
-        self.btn_save_config = QPushButton("Lưu cấu hình")
-        self.btn_save_config.clicked.connect(self.on_save_config)
-        self.btn_check_config = QPushButton("Kiểm tra cấu hình")
-        self.btn_check_config.clicked.connect(self.on_check_config)
-        self.btn_open_output = QPushButton("Mở thư mục output")
-        self.btn_open_output.clicked.connect(self.on_open_output_folder)
+        self.btn_save_config = self._make_button(
+            "Lưu cấu hình",
+            self.on_save_config,
+            variant="primary",
+        )
+        self.btn_check_config = self._make_button(
+            "Kiểm tra cấu hình",
+            self.on_check_config,
+        )
+        self.btn_open_output = self._make_button(
+            "Mở thư mục output",
+            self.on_open_output_folder,
+        )
         btn_row.addWidget(self.btn_save_config)
         btn_row.addWidget(self.btn_check_config)
         btn_row.addWidget(self.btn_open_output)
         btn_row.addStretch(1)
-        grid.addLayout(btn_row, len(rows), 0, 1, 3)
+        cfg.layout().addLayout(btn_row)
+        v.addWidget(cfg)
 
-        return box
-
-    # ---- Vùng 2: Mở trợ lý ------------------------------------------ #
-    def _build_open_assistant_group(self) -> QGroupBox:
-        box = QGroupBox("2. Mở trợ lý quyết toán")
-        v = QVBoxLayout(box)
-
-        self.btn_open_assistant = QPushButton("Mở trợ lý quyết toán")
-        self.btn_open_assistant.setMinimumHeight(56)
-        big = QFont()
-        big.setPointSize(13)
-        big.setBold(True)
-        self.btn_open_assistant.setFont(big)
-        self.btn_open_assistant.clicked.connect(self.on_open_assistant)
-        v.addWidget(self.btn_open_assistant)
-
-        self.lbl_overall_status = QLabel("Trạng thái: Sẵn sàng.")
-        self.lbl_overall_status.setStyleSheet("color: #0b5394; font-weight: bold;")
-        v.addWidget(self.lbl_overall_status)
-        return box
-
-    # ---- Vùng 3: File output hiện tại ------------------------------- #
-    def _build_current_file_group(self) -> QGroupBox:
-        box = QGroupBox("3. File output hiện tại")
-        grid = QGridLayout(box)
-
-        self.lbl_file_path = QLabel("—")
-        self.lbl_file_path.setWordWrap(True)
-        self.lbl_file_path.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.lbl_file_status = QLabel("—")
-        self.lbl_file_detected = QLabel("—")
-        self.lbl_file_note = QLabel("—")
-        self.lbl_file_note.setWordWrap(True)
-        self.lbl_file_note.setStyleSheet("color: #a94442;")
-
-        grid.addWidget(QLabel("Đường dẫn file output:"), 0, 0)
-        grid.addWidget(self.lbl_file_path, 0, 1)
-        grid.addWidget(QLabel("Trạng thái file:"), 1, 0)
-        grid.addWidget(self.lbl_file_status, 1, 1)
-        grid.addWidget(QLabel("Thời gian phát hiện:"), 2, 0)
-        grid.addWidget(self.lbl_file_detected, 2, 1)
-        grid.addWidget(QLabel("Ghi chú / lỗi:"), 3, 0)
-        grid.addWidget(self.lbl_file_note, 3, 1)
-
-        btn_row = QHBoxLayout()
-        self.btn_open_result = QPushButton("Mở file kết quả")
-        self.btn_open_result.clicked.connect(self.on_open_result_file)
-        self.btn_confirm_review = QPushButton("Đã kiểm tra và dùng file này")
-        self.btn_confirm_review.clicked.connect(self.on_confirm_reviewed)
-        self.btn_open_containing = QPushButton("Mở thư mục chứa file")
-        self.btn_open_containing.clicked.connect(self.on_open_containing_folder)
-        btn_row.addWidget(self.btn_open_result)
-        btn_row.addWidget(self.btn_confirm_review)
-        btn_row.addWidget(self.btn_open_containing)
-        btn_row.addStretch(1)
-        grid.addLayout(btn_row, 4, 0, 1, 2)
-
-        return box
-
-    # ---- Vùng 4: Duyệt dữ liệu -------------------------------------- #
-    def _build_preview_group(self) -> QGroupBox:
-        box = QGroupBox("4. Duyệt dữ liệu từ file output")
-        v = QVBoxLayout(box)
-
-        self.btn_preview = QPushButton("Duyệt dữ liệu từ file output")
-        self.btn_preview.setMinimumHeight(40)
-        self.btn_preview.setEnabled(False)  # chỉ bật sau khi xác nhận file
-        self.btn_preview.clicked.connect(self.on_preview_data)
-        v.addWidget(self.btn_preview)
-
-        self.lbl_preview_info = QLabel("Chưa duyệt dữ liệu.")
-        v.addWidget(self.lbl_preview_info)
-
-        self.table_preview = QTableWidget(0, 0)
-        self.table_preview.setMinimumHeight(200)
-        self.table_preview.horizontalHeader().setStretchLastSection(True)
-        v.addWidget(self.table_preview)
-
-        return box
-
-    # ---- Vùng 5: Lịch sử / Log -------------------------------------- #
-    def _build_history_group(self) -> QGroupBox:
-        box = QGroupBox("5. Lịch sử & Nhật ký")
-        v = QVBoxLayout(box)
-
-        splitter = QSplitter(Qt.Vertical)
-
-        self.table_history = QTableWidget(0, 6)
+        # --- Lịch sử xử lý ---
+        hist = self._card("Lịch sử xử lý")
+        self.table_history = QTableWidget(0, 4)
         self.table_history.setHorizontalHeaderLabels(
-            ["ID", "Thời gian", "Tên file", "Đường dẫn working", "Trạng thái", "Ghi chú"]
+            ["Thời gian", "Tên file", "Trạng thái", "Ghi chú"]
         )
         self.table_history.horizontalHeader().setSectionResizeMode(
             QHeaderView.Interactive
         )
         self.table_history.horizontalHeader().setStretchLastSection(True)
         self.table_history.setEditTriggers(QTableWidget.NoEditTriggers)
-        splitter.addWidget(self.table_history)
+        self.table_history.setAlternatingRowColors(True)
+        self.table_history.setMinimumHeight(200)
+        hist.layout().addWidget(self.table_history)
+        v.addWidget(hist)
 
-        log_wrap = QWidget()
-        log_layout = QVBoxLayout(log_wrap)
-        log_layout.setContentsMargins(0, 0, 0, 0)
-        log_layout.addWidget(QLabel("Nhật ký hoạt động:"))
+        # --- Nhật ký hoạt động ---
+        logc = self._card("Nhật ký hoạt động")
         self.txt_log = QPlainTextEdit()
         self.txt_log.setReadOnly(True)
         self.txt_log.setMaximumBlockCount(2000)
-        log_layout.addWidget(self.txt_log)
-        splitter.addWidget(log_wrap)
+        self.txt_log.setMinimumHeight(160)
+        logc.layout().addWidget(self.txt_log)
+        v.addWidget(logc)
 
-        splitter.setSizes([260, 180])
-        v.addWidget(splitter)
-        return box
+        v.addStretch(0)
+        return scroll
 
     # ================================================================== #
     # Khởi tạo phụ trợ
@@ -330,20 +437,19 @@ class MainWindow(QMainWindow):
                 "file_hash": record.get("file_hash"),
                 "status": record.get("status"),
                 "detected_at": record.get("created_at"),
+                "output_path": record.get("output_path"),
             }
             self._update_current_file_labels(
                 note=record.get("note") or "Đã khôi phục từ phiên làm việc trước."
             )
-            # Nếu trước đó người dùng đã xác nhận thì cho phép duyệt lại.
-            if record.get("status") in CONFIRMED_STATUSES:
-                self.current_reviewed_file = working_path
-                self.btn_preview.setEnabled(True)
+            self.overall_status = record.get("status") or self.overall_status
+            self._update_button_states()
             self.append_log(
                 f"Khôi phục file gần nhất: {record.get('file_name')}"
             )
         else:
             self.append_log(
-                "Bản ghi gần nhất không còn file working trên ổ đĩa."
+                "Bản ghi gần nhất không còn file trên ổ đĩa."
             )
 
     # ================================================================== #
@@ -363,21 +469,44 @@ class MainWindow(QMainWindow):
 
     def set_overall_status(self, status: str, message: str) -> None:
         self.overall_status = status
-        self.lbl_overall_status.setText(f"Trạng thái: {message}")
+        self.lbl_overall_status.setText(message)
+
+    def _update_button_states(self) -> None:
+        """Bật/tắt các nút theo việc đã có file hay chưa."""
+        cw = self.current_working_file
+        has_file = bool(
+            cw and os.path.exists(cw.get("working_path") or "")
+        )
+        self.btn_open_result.setEnabled(has_file)
+        self.btn_mark_done.setEnabled(has_file)
+        self.btn_open_containing.setEnabled(has_file)
 
     def _update_current_file_labels(self, note: Optional[str] = None) -> None:
         cw = self.current_working_file
         if not cw:
-            self.lbl_file_path.setText("—")
-            self.lbl_file_status.setText("—")
-            self.lbl_file_detected.setText("—")
-            self.lbl_file_note.setText("—")
+            self.lbl_file_name.setText("Chưa có file kết quả")
+            self.lbl_file_name.setToolTip("")
+            self.lbl_file_status.setText(
+                "Hãy tải file từ trợ lý hoặc bấm “Chọn file có sẵn”."
+            )
+            self.lbl_file_detected.setText("")
+            self.lbl_file_note.setText("")
+            self._update_button_states()
             return
-        self.lbl_file_path.setText(cw.get("working_path") or "—")
-        self.lbl_file_status.setText(status_text(cw.get("status")))
-        self.lbl_file_detected.setText(cw.get("detected_at") or "—")
+
+        working_path = cw.get("working_path") or ""
+        self.lbl_file_name.setText(
+            cw.get("file_name") or os.path.basename(working_path) or "—"
+        )
+        self.lbl_file_name.setToolTip(working_path)
+        self.lbl_file_status.setText("Trạng thái: " + friendly_status(cw.get("status")))
+        detected = cw.get("detected_at") or ""
+        self.lbl_file_detected.setText(
+            ("Phát hiện lúc: " + detected) if detected else ""
+        )
         if note is not None:
             self.lbl_file_note.setText(note)
+        self._update_button_states()
 
     def refresh_history(self) -> None:
         try:
@@ -389,11 +518,9 @@ class MainWindow(QMainWindow):
         self.table_history.setRowCount(len(records))
         for r, rec in enumerate(records):
             values = [
-                str(rec.get("id", "")),
                 rec.get("created_at", "") or "",
                 rec.get("file_name", "") or "",
-                rec.get("working_path", "") or "",
-                status_text(rec.get("status")),
+                friendly_status(rec.get("status")),
                 rec.get("note", "") or "",
             ]
             for c, val in enumerate(values):
@@ -406,6 +533,7 @@ class MainWindow(QMainWindow):
         note: Optional[str] = None,
         mark_reviewed: bool = False,
         mark_previewed: bool = False,
+        output_path: Optional[str] = None,
     ) -> None:
         """Cập nhật DB + nhãn cho file hiện tại."""
         if not self.current_working_file:
@@ -419,6 +547,7 @@ class MainWindow(QMainWindow):
                     note=note,
                     mark_reviewed=mark_reviewed,
                     mark_previewed=mark_previewed,
+                    output_path=output_path,
                 )
             except Exception:  # noqa: BLE001
                 self.logger.exception("Không cập nhật được trạng thái DB.")
@@ -427,7 +556,7 @@ class MainWindow(QMainWindow):
         self.refresh_history()
 
     # ================================================================== #
-    # Vùng 1: handler cấu hình
+    # Cài đặt: handler cấu hình
     # ================================================================== #
     def _browse_bat(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -450,13 +579,6 @@ class MainWindow(QMainWindow):
         if path:
             self.edit_output.setText(os.path.normpath(path))
 
-    def _browse_backup(self) -> None:
-        path = QFileDialog.getExistingDirectory(
-            self, "Chọn thư mục backup", self.edit_backup.text()
-        )
-        if path:
-            self.edit_backup.setText(os.path.normpath(path))
-
     def _browse_daily(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -472,7 +594,6 @@ class MainWindow(QMainWindow):
             self.config.set("bat_path", self.edit_bat.text().strip())
             self.config.set("download_folder", self.edit_download.text().strip())
             self.config.set("output_folder", self.edit_output.text().strip())
-            self.config.set("backup_folder", self.edit_backup.text().strip())
             self.config.set("daily_tracking_file", self.edit_daily.text().strip())
             self.config.ensure_folders()
             self.config.save()
@@ -506,10 +627,6 @@ class MainWindow(QMainWindow):
         lines.append(
             f"• Thư mục output: {'OK' if os.path.isdir(out) else 'KHÔNG TỒN TẠI'}\n  {out}"
         )
-        bak = self.edit_backup.text().strip()
-        lines.append(
-            f"• Thư mục backup: {'OK' if os.path.isdir(bak) else 'KHÔNG TỒN TẠI'}\n  {bak}"
-        )
         daily = self.edit_daily.text().strip()
         daily_dir = os.path.dirname(daily)
         daily_ok = "OK" if os.path.isfile(daily) else (
@@ -530,7 +647,7 @@ class MainWindow(QMainWindow):
             self.show_error("Lỗi", f"Không mở được thư mục output.\nChi tiết: {exc}")
 
     # ================================================================== #
-    # Vùng 2: mở trợ lý
+    # Chức năng: mở trợ lý
     # ================================================================== #
     def on_open_assistant(self) -> None:
         bat_path = self.config.bat_path
@@ -538,7 +655,8 @@ class MainWindow(QMainWindow):
             self.logger.error("Không tìm thấy file .bat: %s", bat_path)
             self.show_error(
                 "Không tìm thấy file .bat",
-                "Đường dẫn file .bat không tồn tại. Vui lòng kiểm tra lại cấu hình.\n"
+                "Đường dẫn file .bat không tồn tại. Vui lòng kiểm tra lại trong tab "
+                "Cài đặt.\n"
                 f"Đường dẫn hiện tại: {bat_path}",
             )
             return
@@ -562,36 +680,99 @@ class MainWindow(QMainWindow):
             )
 
     # ================================================================== #
-    # Vùng 3: file output hiện tại
+    # Chức năng: file output hiện tại
     # ================================================================== #
-    def on_output_ready(self, result: Dict[str, Any]) -> None:
-        """Nhận tín hiệu từ watcher khi có file output mới."""
-        self.current_working_file = result
-        # File mới -> phải xác nhận lại trước khi duyệt.
-        self.current_reviewed_file = None
-        self.btn_preview.setEnabled(False)
+    def on_select_existing_file(self) -> None:
+        """Chọn file cũ để thực hiện trực tiếp Bước 2, không cần chạy Bước 1."""
+        extensions = []
+        for configured_ext in self.config.allowed_extensions or []:
+            ext = str(configured_ext).strip().lower()
+            if ext:
+                extensions.append(ext if ext.startswith(".") else f".{ext}")
+        extension_filter = " ".join(f"*{ext}" for ext in extensions)
+        file_filter = (
+            f"File kết quả ({extension_filter});;Tất cả (*.*)"
+            if extension_filter
+            else "Tất cả (*.*)"
+        )
+        start_dir = (
+            self.config.download_folder
+            if os.path.isdir(self.config.download_folder)
+            else ""
+        )
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Chọn file có sẵn để kiểm tra",
+            start_dir,
+            file_filter,
+        )
+        if not path:
+            return
 
+        path = os.path.normpath(path)
+        ext = os.path.splitext(path)[1].lower()
+        allowed = {item.lower() for item in extensions}
+        if allowed and ext not in allowed:
+            self.show_warning(
+                "File không hợp lệ",
+                "Định dạng file chưa được hỗ trợ. Các định dạng cho phép: "
+                + ", ".join(extensions),
+            )
+            return
+        if file_utils.is_temp_download_file(path):
+            self.show_warning(
+                "File chưa sẵn sàng",
+                "Không thể chọn file tạm hoặc file đang tải dở.",
+            )
+            return
+
+        try:
+            result = file_utils.download_file_info(path)
+            record_id = self.database.insert_processed_file(
+                working_path=result["working_path"],
+                status="READY_FOR_REVIEW",
+                original_download_path=result["original_download_path"],
+                backup_path=result["backup_path"],
+                file_name=result["file_name"],
+                file_size=result["file_size"],
+                file_hash=result["file_hash"],
+                note="Người dùng đã chọn file có sẵn để kiểm tra.",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.exception("Không tiếp nhận được file có sẵn: %s", path)
+            self.show_error(
+                "Không chọn được file",
+                f"Không thể tiếp nhận file đã chọn.\nChi tiết: {exc}",
+            )
+            return
+
+        result["id"] = record_id
+        result["status"] = "READY_FOR_REVIEW"
+        self.current_working_file = result
+        note = "Đã chọn file có sẵn. Hãy kiểm tra file rồi xác nhận hoàn tất."
+        self._update_current_file_labels(note=note)
+        self.set_overall_status("READY_FOR_REVIEW", note)
+        self.refresh_history()
+        self.logger.info("Đã chọn file có sẵn cho Bước 2: %s", path)
+        self.append_log(f"Đã chọn file có sẵn: {os.path.basename(path)}")
+
+    def on_output_ready(self, result: Dict[str, Any]) -> None:
+        """Nhận tín hiệu từ watcher khi có file output mới.
+
+        Luồng: file tải về giữ nguyên ở Downloads và tự mở trong Excel để người
+        dùng kiểm tra. Khi bấm "Đã kiểm tra xong" mới sao chép sang Output.
+        """
+        self.current_working_file = result
         self._update_current_file_labels(
-            note="Trợ lý đã bóc tách dữ liệu xong. Vui lòng mở file để kiểm tra."
+            note="Trợ lý đã bóc tách dữ liệu xong. Đang mở file để bạn kiểm tra..."
         )
         self.set_overall_status(
             "READY_FOR_REVIEW",
-            "Trợ lý đã bóc tách dữ liệu xong. Vui lòng mở file để kiểm tra.",
+            "Trợ lý đã bóc tách dữ liệu xong. Đang mở file để bạn kiểm tra...",
         )
         self.refresh_history()
-        self.append_log(
-            f"File output mới sẵn sàng: {result.get('file_name')}"
-        )
-
-        if self.config.auto_open_after_download:
-            try:
-                file_utils.open_file(result["working_path"])
-                self._update_record_status(
-                    "OPENED_FOR_REVIEW",
-                    note="Đã tự động mở file để kiểm tra.",
-                )
-            except Exception:  # noqa: BLE001
-                self.logger.exception("Không tự mở được file output.")
+        self.append_log(f"File mới sẵn sàng: {result.get('file_name')}")
+        self._auto_open_file()
 
     def on_file_error(self, message: str) -> None:
         """Nhận tín hiệu lỗi từ watcher (không dùng hộp thoại chặn)."""
@@ -616,56 +797,147 @@ class MainWindow(QMainWindow):
                 "OPENED_FOR_REVIEW",
                 note="Đã mở file để kiểm tra/chỉnh sửa.",
             )
+            self.set_overall_status(
+                "OPENED_FOR_REVIEW", "Đang mở file để kiểm tra/chỉnh sửa."
+            )
             self.logger.info("Đã mở file kết quả: %s", path)
             self.append_log(f"Đã mở file kết quả: {os.path.basename(path)}")
         except Exception as exc:  # noqa: BLE001
             self.logger.exception("Không mở được file kết quả.")
             self.show_error("Lỗi mở file", f"Không mở được file.\nChi tiết: {exc}")
 
-    def on_confirm_reviewed(self) -> None:
-        if not self.current_working_file:
-            self.show_warning(
-                "Chưa có file", "Chưa có file output hiện tại để xác nhận."
-            )
+    def _auto_open_file(self) -> None:
+        """Tự mở file (trong Downloads) bằng Excel để người dùng kiểm tra."""
+        cw = self.current_working_file
+        if not cw:
             return
-        path = self.current_working_file.get("working_path")
+        path = cw.get("working_path") or ""
+        try:
+            file_utils.open_file(path)
+            self._update_record_status(
+                "OPENED_FOR_REVIEW",
+                note="Đã tự động mở file để kiểm tra.",
+            )
+            self.set_overall_status(
+                "OPENED_FOR_REVIEW",
+                "Đã mở file để bạn kiểm tra. Chỉnh xong hãy lưu, đóng file rồi "
+                "bấm “Đã kiểm tra xong”.",
+            )
+            self.logger.info("Đã tự mở file: %s", path)
+            self.append_log(f"Đã tự mở file: {os.path.basename(path)}")
+        except Exception as exc:  # noqa: BLE001
+            self.logger.exception("Không tự mở được file.")
+            self.lbl_file_note.setText(
+                "Không tự mở được file. Hãy bấm 'Mở lại file' để mở thủ công. "
+                f"Chi tiết: {exc}"
+            )
+            self.set_overall_status(
+                "READY_FOR_REVIEW",
+                "Không tự mở được file. Hãy bấm 'Mở lại file' để mở thủ công.",
+            )
+
+    def _mark_review_done(self) -> bool:
+        """Sao chép file sang Output rồi đánh dấu đã kiểm tra xong.
+
+        Trả về True nếu thành công.
+        """
+        cw = self.current_working_file
+        if not cw:
+            return False
+        path = cw.get("working_path") or ""
         if not path or not os.path.exists(path):
             self.show_error(
-                "File không tồn tại", "File output không còn tồn tại trên ổ đĩa."
+                "File không tồn tại", "File tải về không còn tồn tại trên ổ đĩa."
             )
-            return
+            return False
 
-        # Kiểm tra file có đang bị Excel khóa / còn file tạm ~$ hay không.
+        # File phải được lưu & đóng thì bản sao sang Output mới đúng nội dung.
         try:
             locked = file_utils.is_file_locked(path)
         except FileNotFoundError:
             self.show_error(
-                "File không tồn tại", "File output không còn tồn tại trên ổ đĩa."
+                "File không tồn tại", "File tải về không còn tồn tại trên ổ đĩa."
             )
-            return
+            return False
         if locked:
             self.show_warning(
                 "File đang mở",
-                "File vẫn đang mở trong Excel, vui lòng lưu và đóng file trước.",
+                "File vẫn đang mở trong Excel. Vui lòng lưu và đóng file trước "
+                "khi bấm “Đã kiểm tra xong”.",
             )
-            return
+            return False
 
-        self.current_reviewed_file = path
-        self.btn_preview.setEnabled(True)
+        # Bản Output đã tạo trước đó cho CHÍNH file này (nếu có) -> sẽ thay thế,
+        # không sinh thêm file mới.
+        prev_output = cw.get("output_path")
+
+        try:
+            output_path = file_utils.copy_download_to_output(
+                path, self.config.output_folder
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.exception("Không tạo được bản trong Output.")
+            self.show_error(
+                "Lỗi lưu Output",
+                f"Không tạo được bản trong thư mục Output.\nChi tiết: {exc}",
+            )
+            return False
+
+        # Xóa bản Output cũ của file này để chỉ giữ 1 bản (tên theo timestamp mới).
+        replaced = False
+        if (
+            prev_output
+            and os.path.exists(prev_output)
+            and os.path.abspath(prev_output) != os.path.abspath(output_path)
+            and os.path.abspath(prev_output) != os.path.abspath(path)
+            and file_utils.is_path_within(prev_output, self.config.output_folder)
+        ):
+            try:
+                os.remove(prev_output)
+                replaced = True
+            except OSError:
+                self.logger.warning(
+                    "Không xóa được bản Output cũ: %s", prev_output
+                )
+
+        cw["output_path"] = output_path
+        base = os.path.basename(output_path)
+        note = (
+            f"Đã kiểm tra xong. {'Đã cập nhật' if replaced else 'Đã tạo'} "
+            f"bản Output: {base}"
+        )
         self._update_record_status(
-            "REVIEW_CONFIRMED",
-            note="Người dùng đã kiểm tra và chọn dùng file này.",
+            "COMPLETED",
+            note=note,
             mark_reviewed=True,
+            output_path=output_path,
         )
         self.set_overall_status(
-            "REVIEW_CONFIRMED", "Đã xác nhận file. Có thể duyệt dữ liệu."
+            "COMPLETED",
+            "Đã kiểm tra & hoàn tất. Đã lưu bản vào Output và giữ nguyên file gốc.",
         )
-        self.logger.info("Xác nhận dùng file: %s", path)
-        self.append_log(f"Đã xác nhận dùng file: {os.path.basename(path)}")
-        self.show_info(
-            "Đã xác nhận",
-            "Đã ghi nhận file này. Bạn có thể bấm 'Duyệt dữ liệu từ file output'.",
+        self.logger.info(
+            "%s bản Output: %s",
+            "Đã cập nhật" if replaced else "Đã tạo",
+            output_path,
         )
+        self.append_log(
+            f"{'Đã cập nhật' if replaced else 'Đã tạo'} bản Output: {base}"
+        )
+        return True
+
+    def on_mark_done(self) -> None:
+        if not self.current_working_file:
+            self.show_warning(
+                "Chưa có file", "Hiện chưa có file nào để đánh dấu hoàn tất."
+            )
+            return
+        if self._mark_review_done():
+            self.show_info(
+                "Hoàn tất",
+                "Đã lưu bản đã kiểm tra trong thư mục Output. File gốc vẫn được "
+                "giữ nguyên tại thư mục ban đầu.",
+            )
 
     def on_open_containing_folder(self) -> None:
         if not self.current_working_file:
@@ -677,82 +949,6 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self.logger.exception("Không mở được thư mục chứa file.")
             self.show_error("Lỗi", f"Không mở được thư mục.\nChi tiết: {exc}")
-
-    # ================================================================== #
-    # Vùng 4: duyệt dữ liệu
-    # ================================================================== #
-    def on_preview_data(self) -> None:
-        if not self.current_reviewed_file:
-            self.show_warning(
-                "Chưa xác nhận file",
-                "Bạn cần bấm 'Đã kiểm tra và dùng file này' trước khi duyệt dữ liệu.",
-            )
-            return
-        path = self.current_reviewed_file
-        if not os.path.exists(path):
-            self.show_error(
-                "File không tồn tại", "File đã chọn không còn tồn tại trên ổ đĩa."
-            )
-            return
-
-        try:
-            locked = file_utils.is_file_locked(path)
-        except FileNotFoundError:
-            self.show_error(
-                "File không tồn tại", "File đã chọn không còn tồn tại trên ổ đĩa."
-            )
-            return
-        if locked:
-            self.show_warning(
-                "File đang mở",
-                "File vẫn đang mở trong Excel, vui lòng lưu và đóng file trước.",
-            )
-            return
-
-        try:
-            data = excel_preview.preview_file(path, max_rows=20)
-        except Exception as exc:  # noqa: BLE001
-            self.logger.exception("Lỗi khi đọc dữ liệu preview.")
-            self._update_record_status("ERROR", note=f"Lỗi đọc file: {exc}")
-            self.show_error("Lỗi đọc dữ liệu", f"Không đọc được file.\nChi tiết: {exc}")
-            return
-
-        self._populate_preview_table(data)
-        sheets = ", ".join(data.get("sheets") or []) or "—"
-        self.lbl_preview_info.setText(
-            f"Sheet: [{sheets}]  |  Đang xem: {data.get('sheet_name')}  |  "
-            f"Số dòng: {data.get('row_count')}  |  Số cột: {data.get('column_count')}"
-        )
-        self._update_record_status(
-            "PREVIEWED",
-            note="Đã duyệt (xem trước) dữ liệu từ file output.",
-            mark_previewed=True,
-        )
-        self.set_overall_status("PREVIEWED", "Đã duyệt dữ liệu file output.")
-        self.logger.info(
-            "Đã duyệt dữ liệu file %s (%s dòng, %s cột).",
-            os.path.basename(path),
-            data.get("row_count"),
-            data.get("column_count"),
-        )
-        self.append_log(f"Đã duyệt dữ liệu: {os.path.basename(path)}")
-
-    def _populate_preview_table(self, data: Dict[str, Any]) -> None:
-        rows = data.get("rows") or []
-        col_count = data.get("column_count") or (max((len(r) for r in rows), default=0))
-        col_count = max(col_count, max((len(r) for r in rows), default=0))
-
-        self.table_preview.clear()
-        self.table_preview.setRowCount(len(rows))
-        self.table_preview.setColumnCount(col_count)
-        self.table_preview.setHorizontalHeaderLabels(
-            [f"Cột {i + 1}" for i in range(col_count)]
-        )
-        for r, row in enumerate(rows):
-            for c in range(col_count):
-                val = row[c] if c < len(row) else ""
-                self.table_preview.setItem(r, c, QTableWidgetItem(str(val)))
-        self.table_preview.resizeColumnsToContents()
 
     # ================================================================== #
     # Đóng cửa sổ

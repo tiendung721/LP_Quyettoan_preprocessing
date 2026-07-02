@@ -3,11 +3,12 @@
 Phần mềm desktop Windows giúp điều phối luồng làm việc giữa **GPT Custom** và
 **file Excel output**. Người dùng bấm nút để mở trợ lý GPT Custom bằng file
 `.bat` đã cấu hình sẵn; sau khi tải file output về thư mục Downloads, phần mềm
-tự phát hiện, sao lưu bản gốc, chuyển vào thư mục output chuẩn, cho phép mở file
-để kiểm tra/chỉnh sửa, rồi duyệt (xem trước) dữ liệu từ đúng file đã chỉnh sửa.
+tự phát hiện và **tự mở file trong Excel** để người dùng kiểm tra/chỉnh sửa.
+File tải về **giữ nguyên trong Downloads**; chỉ khi người dùng bấm **Đã kiểm
+tra xong**, phần mềm mới **sao chép thêm một bản vào thư mục Output**.
 
-> Giai đoạn hiện tại **chưa ghi thật** vào file theo dõi hàng ngày — chỉ đọc và
-> hiển thị preview dữ liệu.
+> Giai đoạn hiện tại **chưa ghi thật** vào file theo dõi hàng ngày — việc kiểm
+> tra và chỉnh sửa dữ liệu thực hiện trực tiếp trong Excel.
 
 ---
 
@@ -60,7 +61,6 @@ File cấu hình mặc định nằm ở `D:\RPA_QuyetToan\Config\settings.json`
   "bat_path": "D:\\RPA_QuyetToan\\Launcher\\Mo_Tro_Ly_Quyet_Toan.bat",
   "download_folder": "D:\\RPA_QuyetToan\\Downloads",
   "output_folder": "D:\\RPA_QuyetToan\\Outputs",
-  "backup_folder": "D:\\RPA_QuyetToan\\Backup",
   "daily_tracking_file": "D:\\RPA_QuyetToan\\Daily\\file_theo_doi_hang_ngay.xlsx",
   "allowed_extensions": [".xlsx", ".xlsm", ".csv"],
   "output_file_patterns": [
@@ -69,8 +69,7 @@ File cấu hình mặc định nằm ở `D:\RPA_QuyetToan\Config\settings.json`
     "input_trip*.xlsx",
     "*.xlsx"
   ],
-  "download_stable_seconds": 3,
-  "auto_open_after_download": false
+  "download_stable_seconds": 3
 }
 ```
 
@@ -79,17 +78,15 @@ File cấu hình mặc định nằm ở `D:\RPA_QuyetToan\Config\settings.json`
 | Trường | Mô tả |
 | --- | --- |
 | `bat_path` | Đường dẫn file `.bat` mở trợ lý GPT Custom |
-| `download_folder` | Thư mục Chrome/GPT tải file output về (được theo dõi) |
-| `output_folder` | Thư mục lưu file làm việc (working), chia theo ngày |
-| `backup_folder` | Thư mục lưu bản gốc (backup), chia theo ngày |
+| `download_folder` | Thư mục Chrome/GPT tải file về (được theo dõi); file gốc giữ nguyên tại đây |
+| `output_folder` | Thư mục lưu bản đã kiểm tra (sao chép khi bấm "Đã kiểm tra xong"), chia theo ngày |
 | `daily_tracking_file` | File theo dõi hàng ngày (giai đoạn này chưa ghi) |
 | `allowed_extensions` | Các đuôi file được chấp nhận |
 | `output_file_patterns` | Mẫu tên file output cần bắt |
 | `download_stable_seconds` | Số giây tối thiểu để coi file đã tải xong |
-| `auto_open_after_download` | Tự mở file ngay khi phát hiện xong |
 
-Bạn cũng có thể chỉnh các đường dẫn ngay trên giao diện (Vùng 1) rồi bấm
-**Lưu cấu hình**.
+Bạn cũng có thể chỉnh các đường dẫn ngay trên giao diện, tại tab **Cài đặt**,
+rồi bấm **Lưu cấu hình**.
 
 ## 6. Đặt thư mục tải về của Chrome
 
@@ -104,17 +101,26 @@ Bạn cũng có thể chỉnh các đường dẫn ngay trên giao diện (Vùng
 
 ## 7. Các bước sử dụng
 
-1. Bấm **Mở trợ lý quyết toán** (chạy file `.bat`).
-2. Gửi file lên **GPT Custom** và chờ xử lý.
-3. **Tải file output** về (Chrome lưu vào `Downloads`).
-4. Phần mềm tự phát hiện, sao lưu bản gốc, chuyển vào `Outputs\YYYY-MM-DD\`
-   và hiển thị ở **Vùng 3**.
-5. Bấm **Mở file kết quả** để kiểm tra/chỉnh sửa trong Excel.
-6. **Lưu và đóng** file Excel.
-7. Bấm **Đã kiểm tra và dùng file này** (nếu file còn mở, app sẽ nhắc bạn
-   lưu và đóng trước).
-8. Bấm **Duyệt dữ liệu từ file output** để xem preview 20 dòng đầu, số sheet,
-   số dòng, số cột.
+Mọi thao tác hằng ngày nằm ở tab **Chức năng**, theo 2 bước:
+
+Bạn có thể bỏ qua Bước 1 và bấm **Chọn file có sẵn** ở Bước 2 để dùng lại một
+file `.xlsx`, `.xlsm` hoặc `.csv` cũ. File được chọn sẽ được ghi nhận để kiểm tra
+và xác nhận như file vừa tải từ trợ lý.
+
+1. **Bước 1** — Bấm **Mở trợ lý quyết toán** (chạy file `.bat`), gửi dữ liệu
+   lên **GPT Custom** và chờ xử lý.
+2. **Tải file output** về (Chrome lưu vào `Downloads`).
+3. Phần mềm tự phát hiện và **tự mở file trong Excel**. File gốc **giữ nguyên
+   trong Downloads**.
+4. **Bước 2** — Kiểm tra/chỉnh sửa toàn bộ dữ liệu và trạng thái nhập cho từng
+   dòng ngay trong Excel, sau đó **lưu và đóng file**.
+5. Bấm **Đã kiểm tra xong** ở thẻ Bước 2 → phần mềm **sao chép một bản vào
+   `Outputs\YYYY-MM-DD\`** và chuyển trạng thái **Đã kiểm tra & hoàn tất**.
+   File gốc vẫn được giữ nguyên trong thư mục ban đầu.
+   - Nếu lỡ đóng file, bấm **Mở lại file** để mở lại.
+   - Nếu file còn đang mở trong Excel, app sẽ nhắc lưu và đóng trước.
+
+Tab **Cài đặt** chứa các đường dẫn/thư mục, lịch sử xử lý và nhật ký.
 
 ## 8. Cấu trúc thư mục dữ liệu
 
@@ -123,9 +129,8 @@ D:\RPA_QuyetToan
 ├── App\           QuyetToanAssistant.exe (khi đóng gói)
 ├── Config\        settings.json
 ├── Launcher\      Mo_Tro_Ly_Quyet_Toan.bat
-├── Downloads\     Nơi Chrome/GPT tải file output về
-├── Outputs\       File làm việc (working), chia theo ngày
-├── Backup\        Bản gốc (backup_original_...), chia theo ngày
+├── Downloads\     Nơi Chrome/GPT tải file về; file gốc giữ nguyên tại đây
+├── Outputs\       Bản đã kiểm tra (sao chép khi bấm "Đã kiểm tra xong"), chia theo ngày
 ├── Daily\         file_theo_doi_hang_ngay.xlsx
 ├── Database\      app_state.db
 └── Logs\          app_YYYYMMDD.log
@@ -142,11 +147,11 @@ project/
     ├── __init__.py
     ├── config.py           Nạp/lưu settings.json, tạo thư mục
     ├── database.py         SQLite: processed_files
-    ├── file_utils.py       Kiểm tra khóa, chờ tải xong, hash, di chuyển file
+    ├── file_utils.py       Kiểm tra khóa, chờ tải xong, hash, sao chép sang Output
     ├── watcher.py          Theo dõi Downloads bằng watchdog
-    ├── excel_preview.py    Đọc Excel/CSV, lấy preview
     ├── logger_setup.py     Cấu hình logging
-    └── main_window.py      Giao diện PySide6
+    ├── theme.py            Bộ style QSS (tông sáng, hiện đại)
+    └── main_window.py      Giao diện PySide6 (sidebar + 2 tab)
 ```
 
 ## 10. Đóng gói bằng PyInstaller (tùy chọn)
@@ -160,9 +165,14 @@ File `.exe` sẽ nằm trong thư mục `dist\QuyetToanAssistant\`.
 
 ## 11. Ghi chú vận hành
 
-- Phần mềm **không tự xóa** và **không ghi đè** file cũ; luôn tạo backup bản gốc.
+- File tải về **giữ nguyên trong Downloads**; phần mềm **không tự xóa/di chuyển**
+  file này.
+- Mỗi file chỉ có **một bản trong Output**: nếu bạn kiểm tra & xác nhận lại cùng
+  một file, phần mềm **không tạo thêm file mới** mà **thay bản cũ** bằng bản mới
+  (tên đặt lại theo mốc thời gian mới nhất). Các file tải về khác nhau vẫn có bản
+  Output riêng.
 - Dùng giờ local của Windows (không dùng UTC).
 - Có thể tắt/mở lại app bất kỳ lúc nào; file gần nhất được khôi phục trên giao diện.
-- Khi có file output mới, nút **Duyệt dữ liệu** bị khóa cho tới khi bạn bấm
-  **Đã kiểm tra và dùng file này**.
+- Khi có file mới, phần mềm tự mở file trong Excel; bạn kiểm tra/chỉnh sửa xong,
+  lưu và đóng file rồi bấm **Đã kiểm tra xong** để lưu bản vào Output.
 - Mọi lỗi được ghi vào log tại `D:\RPA_QuyetToan\Logs\app_YYYYMMDD.log`.

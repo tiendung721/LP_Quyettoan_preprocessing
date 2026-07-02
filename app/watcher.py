@@ -1,8 +1,8 @@
 """Theo dõi thư mục Downloads bằng watchdog.
 
 Khi phát hiện file output hợp lệ, xử lý trong luồng riêng (không block UI):
-chờ file tải xong -> sao lưu + chuyển vào Outputs -> ghi database ->
-phát tín hiệu (signal) về MainWindow.
+chờ file tải xong -> giữ nguyên trong Downloads -> ghi database -> phát tín hiệu
+(signal) về MainWindow. Chỉ sao chép sang Outputs sau khi người dùng xác nhận.
 """
 
 from __future__ import annotations
@@ -61,6 +61,9 @@ class DownloadWatcher:
 
         self._observer = None
         self._processing = set()
+        # Các file đã ghi nhận trong phiên này -> bỏ qua sự kiện sửa file sau đó
+        # (khi người dùng chỉnh & lưu file ngay trong thư mục Downloads).
+        self._handled_paths = set()
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ #
@@ -104,7 +107,7 @@ class DownloadWatcher:
                 return
 
             with self._lock:
-                if path in self._processing:
+                if path in self._processing or path in self._handled_paths:
                     return
                 self._processing.add(path)
 
@@ -117,7 +120,7 @@ class DownloadWatcher:
 
     # ------------------------------------------------------------------ #
     def _process_file(self, path: str) -> None:
-        """Chờ file ổn định, sao lưu, chuyển vào output và ghi database."""
+        """Chờ file ổn định, thu thập thông tin và ghi database."""
         name = os.path.basename(path)
         try:
             self._emit_log(f"Phát hiện file mới: {name}")
@@ -141,13 +144,8 @@ class DownloadWatcher:
 
             self._emit_log(f"File đã tải xong (ổn định): {name}")
 
-            result = file_utils.safe_move_download_to_output(
-                path, self.config.output_folder, self.config.backup_folder
-            )
-            self._emit_log(
-                "Đã sao lưu bản gốc và chuyển vào thư mục output: "
-                f"{result['file_name']}"
-            )
+            # Giữ nguyên file trong Downloads, chỉ thu thập thông tin để ghi nhận.
+            result = file_utils.download_file_info(path)
 
             record_id = self.database.insert_processed_file(
                 working_path=result["working_path"],
@@ -161,6 +159,10 @@ class DownloadWatcher:
             )
             result["id"] = record_id
             result["status"] = "READY_FOR_REVIEW"
+
+            # Ghi nhận đã xử lý -> bỏ qua các sự kiện sửa file về sau.
+            with self._lock:
+                self._handled_paths.add(path)
 
             self.logger.info(
                 "Đã ghi database bản ghi #%s cho file %s",

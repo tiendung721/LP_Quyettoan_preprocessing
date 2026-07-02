@@ -24,7 +24,6 @@ SUBFOLDERS = [
     "Launcher",
     "Downloads",
     "Outputs",
-    "Backup",
     "Daily",
     "Database",
     "Logs",
@@ -38,7 +37,6 @@ def get_default_settings(app_root: str = DEFAULT_APP_ROOT) -> Dict[str, Any]:
         "bat_path": os.path.join(app_root, "Launcher", "Mo_Tro_Ly_Quyet_Toan.bat"),
         "download_folder": os.path.join(app_root, "Downloads"),
         "output_folder": os.path.join(app_root, "Outputs"),
-        "backup_folder": os.path.join(app_root, "Backup"),
         "daily_tracking_file": os.path.join(
             app_root, "Daily", "file_theo_doi_hang_ngay.xlsx"
         ),
@@ -117,10 +115,6 @@ class AppConfig:
         return self.data.get("output_folder", "")
 
     @property
-    def backup_folder(self) -> str:
-        return self.data.get("backup_folder", "")
-
-    @property
     def daily_tracking_file(self) -> str:
         return self.data.get("daily_tracking_file", "")
 
@@ -170,7 +164,6 @@ class AppConfig:
         for folder in (
             self.download_folder,
             self.output_folder,
-            self.backup_folder,
             self.logs_dir,
         ):
             if folder:

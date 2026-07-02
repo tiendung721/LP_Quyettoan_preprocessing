@@ -2,7 +2,7 @@
 
 Bao gồm: kiểm tra file bị khóa, nhận diện file tạm khi tải, kiểm tra file
 hợp lệ theo cấu hình, chờ file tải xong (ổn định dung lượng), tính hash,
-di chuyển file download vào thư mục output chuẩn, mở file / mở thư mục.
+sao chép file vào thư mục output chuẩn, mở file / mở thư mục.
 """
 
 from __future__ import annotations
@@ -149,23 +149,40 @@ def sha256_file(path: str, chunk_size: int = 1024 * 1024) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Di chuyển file download vào output chuẩn
+# Thông tin file tải về (giữ nguyên tại thư mục Downloads)
 # ---------------------------------------------------------------------------
-def safe_move_download_to_output(
-    download_path: str,
-    output_folder: str,
-    backup_folder: str,
-) -> Dict:
-    """Sao lưu bản gốc rồi chuyển file download vào thư mục output theo ngày.
+def download_file_info(download_path: str) -> Dict:
+    """Thu thập thông tin file vừa tải về mà KHÔNG di chuyển/sao lưu.
 
-    - File làm việc (working) lưu vào ``output_folder\\YYYY-MM-DD\\``.
-    - File backup bản gốc lưu vào ``backup_folder\\YYYY-MM-DD\\`` (thư mục riêng).
-    - Tên file working: quyet_toan_output_YYYYMMDD_HHMMSS<ext>
-    - Tên file backup:  backup_original_YYYYMMDD_HHMMSS<ext>
-    - Luôn tạo backup bản gốc trước, không xóa/không ghi đè file cũ.
-    - Giữ nguyên phần mở rộng gốc để đảm bảo đọc lại đúng (ví dụ .csv, .xlsm).
+    File tải về được giữ nguyên trong thư mục Downloads để người dùng mở và
+    chỉnh sửa trực tiếp. Chỉ khi người dùng xác nhận đã kiểm tra xong thì mới
+    tạo thêm một bản trong thư mục Output (xem ``copy_download_to_output``).
 
-    Trả về dict thông tin file working.
+    Trả về dict thông tin file đang làm việc (chính là file trong Downloads).
+    """
+    if not os.path.exists(download_path):
+        raise FileNotFoundError(download_path)
+
+    return {
+        "original_download_path": download_path,
+        "backup_path": None,
+        "working_path": download_path,
+        "file_name": os.path.basename(download_path),
+        "file_size": os.path.getsize(download_path),
+        "file_hash": sha256_file(download_path),
+        "detected_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def copy_download_to_output(download_path: str, output_folder: str) -> str:
+    """Sao chép file (đã kiểm tra xong) từ Downloads sang thư mục Output.
+
+    - Giữ nguyên file gốc trong Downloads; chỉ tạo thêm một bản trong Output.
+    - Bản Output lưu vào ``output_folder\\YYYY-MM-DD\\``.
+    - Tên bản Output: quyet_toan_output_YYYYMMDD_HHMMSS<ext> (không ghi đè).
+    - Giữ nguyên phần mở rộng gốc (ví dụ .csv, .xlsm).
+
+    Trả về đường dẫn bản Output vừa tạo.
     """
     if not os.path.exists(download_path):
         raise FileNotFoundError(download_path)
@@ -173,40 +190,29 @@ def safe_move_download_to_output(
     now = datetime.now()
     date_dir = now.strftime("%Y-%m-%d")
     timestamp = now.strftime("%Y%m%d_%H%M%S")
-
     ext = os.path.splitext(download_path)[1].lower() or ".xlsx"
 
-    # File working -> thư mục output theo ngày.
     output_day = os.path.join(output_folder, date_dir)
     os.makedirs(output_day, exist_ok=True)
-    working_path = os.path.join(output_day, f"quyet_toan_output_{timestamp}{ext}")
+    output_path = _unique_path(
+        os.path.join(output_day, f"quyet_toan_output_{timestamp}{ext}")
+    )
 
-    # File backup -> thư mục backup riêng theo ngày.
-    backup_day = os.path.join(backup_folder, date_dir)
-    os.makedirs(backup_day, exist_ok=True)
-    backup_path = os.path.join(backup_day, f"backup_original_{timestamp}{ext}")
+    shutil.copy2(download_path, output_path)
+    return output_path
 
-    # Nếu vì lý do nào đó tên đã tồn tại thì thêm hậu tố để không ghi đè.
-    working_path = _unique_path(working_path)
-    backup_path = _unique_path(backup_path)
 
-    # 1) Tạo backup bản gốc trước (copy2 giữ metadata).
-    shutil.copy2(download_path, backup_path)
-    # 2) Chuyển bản gốc thành file working.
-    shutil.move(download_path, working_path)
-
-    file_size = os.path.getsize(working_path)
-    file_hash = sha256_file(working_path)
-
-    return {
-        "original_download_path": download_path,
-        "backup_path": backup_path,
-        "working_path": working_path,
-        "file_name": os.path.basename(working_path),
-        "file_size": file_size,
-        "file_hash": file_hash,
-        "detected_at": now.strftime("%Y-%m-%d %H:%M:%S"),
-    }
+def is_path_within(path: str, folder: str) -> bool:
+    """Trả về True khi ``path`` nằm trong ``folder`` (so sánh an toàn theo path)."""
+    if not path or not folder:
+        return False
+    try:
+        normalized_path = os.path.normcase(os.path.abspath(path))
+        normalized_folder = os.path.normcase(os.path.abspath(folder))
+        return os.path.commonpath([normalized_path, normalized_folder]) == normalized_folder
+    except ValueError:
+        # Khác ổ đĩa trên Windows thì chắc chắn không nằm trong thư mục.
+        return False
 
 
 def _unique_path(path: str) -> str:

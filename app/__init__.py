@@ -5,7 +5,6 @@ __all__ = [
     "database",
     "file_utils",
     "watcher",
-    "excel_preview",
     "logger_setup",
     "main_window",
 ]

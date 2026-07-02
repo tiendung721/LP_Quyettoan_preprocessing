@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS processed_files (
     updated_at TEXT NOT NULL,
     reviewed_at TEXT,
     previewed_at TEXT,
+    output_path TEXT,
     note TEXT
 );
 """
@@ -45,9 +46,17 @@ class Database:
 
     # ------------------------------------------------------------------ #
     def init_db(self) -> None:
-        """Tạo bảng nếu chưa tồn tại."""
+        """Tạo bảng nếu chưa tồn tại (và bổ sung cột mới cho DB cũ)."""
         with self._connect() as conn:
             conn.execute(_CREATE_TABLE_SQL)
+            # Migration: DB từ phiên bản cũ có thể chưa có cột output_path.
+            cols = {row["name"] for row in conn.execute(
+                "PRAGMA table_info(processed_files)"
+            )}
+            if "output_path" not in cols:
+                conn.execute(
+                    "ALTER TABLE processed_files ADD COLUMN output_path TEXT"
+                )
             conn.commit()
 
     # ------------------------------------------------------------------ #
@@ -97,6 +106,7 @@ class Database:
         note: Optional[str] = None,
         mark_reviewed: bool = False,
         mark_previewed: bool = False,
+        output_path: Optional[str] = None,
     ) -> None:
         """Cập nhật trạng thái của một bản ghi."""
         now = _now()
@@ -112,6 +122,9 @@ class Database:
         if mark_previewed:
             fields.append("previewed_at = ?")
             params.append(now)
+        if output_path is not None:
+            fields.append("output_path = ?")
+            params.append(output_path)
 
         params.append(record_id)
         with self._connect() as conn:

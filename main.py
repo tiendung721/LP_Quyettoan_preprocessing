@@ -21,6 +21,7 @@ def main() -> int:
         )
         return 1
 
+    from app import theme
     from app.config import AppConfig
     from app.database import Database
     from app.logger_setup import setup_logger
@@ -28,6 +29,7 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName("Trợ Lý Quyết Toán RPA")
+    theme.apply_theme(app)
 
     try:
         # 1) Nạp cấu hình (tự tạo settings.json nếu chưa có).
