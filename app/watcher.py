@@ -51,6 +51,10 @@ class _DownloadEventHandler(FileSystemEventHandler):
         if dest and not event.is_directory:
             self.watcher.handle_candidate(dest)
 
+    def on_deleted(self, event):
+        if not event.is_directory:
+            self.watcher.forget(event.src_path)
+
 
 class DownloadWatcher:
     def __init__(self, config: "AppConfig", database: "Database", logger: "logging.Logger"):
@@ -90,6 +94,29 @@ class DownloadWatcher:
                 pass
             self._observer = None
             self.logger.info("Đã dừng theo dõi thư mục tải về.")
+
+    # ------------------------------------------------------------------ #
+    def mark_handled(self, path: str) -> None:
+        """Đánh dấu một file đã được tiếp nhận từ trước (khôi phục khi mở app).
+
+        Nhờ vậy khi người dùng chỉnh và lưu chính file đó trong thư mục tải về,
+        watcher không coi đây là file mới (tránh ghi bản ghi trùng và tự mở lại
+        file đang được chỉnh).
+        """
+        if not path:
+            return
+        with self._lock:
+            self._handled_paths.add(path)
+
+    # ------------------------------------------------------------------ #
+    def forget(self, path: str) -> None:
+        """Quên một file đã bị xóa khỏi thư mục tải về.
+
+        Nhờ vậy nếu người dùng xóa file cũ rồi tải về file mới trùng tên, phần
+        mềm vẫn nhận đó là file mới thay vì bỏ qua.
+        """
+        with self._lock:
+            self._handled_paths.discard(path)
 
     # ------------------------------------------------------------------ #
     def handle_candidate(self, path: str) -> None:

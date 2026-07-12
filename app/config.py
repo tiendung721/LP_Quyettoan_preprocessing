@@ -29,12 +29,33 @@ SUBFOLDERS = [
     "Logs",
 ]
 
+# Nội dung file .bat mẫu cho luồng PAD RPA. Người dùng chỉ cần mở file này và
+# điền lệnh gọi flow của mình vào (viết không dấu để hiển thị đúng trong cmd).
+PAD_BAT_TEMPLATE = """@echo off
+REM ==========================================================================
+REM  Chay flow PAD RPA de nhap du lieu moi len phan mem quyet toan.
+REM
+REM  >>> DIEN LENH GOI FLOW PAD CUA BAN VAO PHIA DUOI, ROI XOA PHAN CANH BAO. <<<
+REM
+REM  Vi du:
+REM    "C:\\Program Files (x86)\\Power Automate\\PAD.Console.Host.exe" ^
+REM        -flow "Nhap_Quyet_Toan" -run
+REM ==========================================================================
+
+echo [PAD RPA] File .bat nay chua duoc cau hinh.
+echo Hay mo file sau va dien lenh chay flow PAD cua ban:
+echo    %~f0
+pause
+exit /b 1
+"""
+
 
 def get_default_settings(app_root: str = DEFAULT_APP_ROOT) -> Dict[str, Any]:
     """Trả về dict cấu hình mặc định."""
     return {
         "app_root": app_root,
         "bat_path": os.path.join(app_root, "Launcher", "Mo_Tro_Ly_Quyet_Toan.bat"),
+        "pad_bat_path": os.path.join(app_root, "Launcher", "Chay_PAD_Quyet_Toan.bat"),
         "download_folder": os.path.join(app_root, "Downloads"),
         "output_folder": os.path.join(app_root, "Outputs"),
         "daily_tracking_file": os.path.join(
@@ -48,7 +69,13 @@ def get_default_settings(app_root: str = DEFAULT_APP_ROOT) -> Dict[str, Any]:
             "*.xlsx",
         ],
         "download_stable_seconds": 3,
-        "auto_open_after_download": False,
+        "cargo_name_mappings": {
+            "VOI": "Vôi",
+            "VOI ROI": "Vôi rời",
+            "VOI BOT": "Vôi bột",
+            "VOI BOT NONG NGHIEP": "Vôi bột nông nghiệp",
+            "BOT NN BAO 25 KG": "Bột NN bao 25 kg",
+        },
     }
 
 
@@ -107,6 +134,10 @@ class AppConfig:
         return self.data.get("bat_path", "")
 
     @property
+    def pad_bat_path(self) -> str:
+        return self.data.get("pad_bat_path", "")
+
+    @property
     def download_folder(self) -> str:
         return self.data.get("download_folder", "")
 
@@ -134,8 +165,9 @@ class AppConfig:
             return 3
 
     @property
-    def auto_open_after_download(self) -> bool:
-        return bool(self.data.get("auto_open_after_download", False))
+    def cargo_name_mappings(self) -> Dict[str, str]:
+        value = self.data.get("cargo_name_mappings", {})
+        return value if isinstance(value, dict) else {}
 
     # Đường dẫn dẫn xuất theo app_root.
     @property
@@ -173,3 +205,28 @@ class AppConfig:
         os.makedirs(os.path.dirname(self.database_path), exist_ok=True)
         if self.daily_tracking_file:
             os.makedirs(os.path.dirname(self.daily_tracking_file), exist_ok=True)
+
+        self.ensure_pad_bat_template()
+
+    def ensure_pad_bat_template(self) -> bool:
+        """Tạo sẵn file .bat mẫu cho luồng PAD RPA nếu chưa có.
+
+        Chỉ tạo khi file nằm trong thư mục Launcher của app_root, để không bao
+        giờ đè lên file .bat thật mà người dùng tự trỏ tới nơi khác.
+
+        Trả về True nếu vừa tạo file mẫu.
+        """
+        path = self.pad_bat_path
+        if not path or os.path.exists(path):
+            return False
+
+        launcher_dir = os.path.join(self.app_root, "Launcher")
+        if os.path.normcase(os.path.dirname(os.path.abspath(path))) != os.path.normcase(
+            os.path.abspath(launcher_dir)
+        ):
+            return False
+
+        os.makedirs(launcher_dir, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(PAD_BAT_TEMPLATE)
+        return True

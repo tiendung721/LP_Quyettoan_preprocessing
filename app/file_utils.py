@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -202,17 +202,51 @@ def copy_download_to_output(download_path: str, output_folder: str) -> str:
     return output_path
 
 
-def is_path_within(path: str, folder: str) -> bool:
-    """Trả về True khi ``path`` nằm trong ``folder`` (so sánh an toàn theo path)."""
-    if not path or not folder:
-        return False
+def find_latest_output_file(
+    folder: str,
+    allowed_extensions: List[str],
+    patterns: List[str],
+) -> Optional[str]:
+    """Tìm file bóc tách hợp lệ mới nhất (theo thời gian sửa) trong ``folder``.
+
+    Dùng khi mở lại app mà bản ghi cũ không còn file: phần mềm tự nhận file mới
+    nhất trong thư mục tải về thay vì bắt người dùng chọn tay.
+    """
+    if not folder or not os.path.isdir(folder):
+        return None
+
+    latest_path: Optional[str] = None
+    latest_mtime = -1.0
+    for name in os.listdir(folder):
+        path = os.path.join(folder, name)
+        if not os.path.isfile(path):
+            continue
+        if is_temp_download_file(path):
+            continue
+        if not is_allowed_output_file(path, allowed_extensions, patterns):
+            continue
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if mtime > latest_mtime:
+            latest_mtime = mtime
+            latest_path = path
+    return latest_path
+
+
+def last_saved_text(path: str) -> str:
+    """Trả về thời điểm lưu gần nhất của file dạng 'HH:MM ngày dd/mm/yyyy'.
+
+    Lấy từ mtime của file chứ không lưu trong database, vì người dùng bấm Lưu
+    trong Excel (bên ngoài phần mềm) nên mtime là nguồn duy nhất luôn đúng.
+    Trả về chuỗi rỗng nếu file không còn tồn tại.
+    """
     try:
-        normalized_path = os.path.normcase(os.path.abspath(path))
-        normalized_folder = os.path.normcase(os.path.abspath(folder))
-        return os.path.commonpath([normalized_path, normalized_folder]) == normalized_folder
-    except ValueError:
-        # Khác ổ đĩa trên Windows thì chắc chắn không nằm trong thư mục.
-        return False
+        mtime = os.path.getmtime(path)
+    except (OSError, TypeError):
+        return ""
+    return datetime.fromtimestamp(mtime).strftime("%H:%M ngày %d/%m/%Y")
 
 
 def _unique_path(path: str) -> str:

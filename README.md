@@ -1,14 +1,22 @@
 # Trợ Lý Quyết Toán RPA
 
-Phần mềm desktop Windows giúp điều phối luồng làm việc giữa **GPT Custom** và
-**file Excel output**. Người dùng bấm nút để mở trợ lý GPT Custom bằng file
-`.bat` đã cấu hình sẵn; sau khi tải file output về thư mục Downloads, phần mềm
-tự phát hiện và **tự mở file trong Excel** để người dùng kiểm tra/chỉnh sửa.
-File tải về **giữ nguyên trong Downloads**; chỉ khi người dùng bấm **Đã kiểm
-tra xong**, phần mềm mới **sao chép thêm một bản vào thư mục Output**.
+Phần mềm desktop Windows điều phối luồng làm việc giữa **GPT Custom**, **file
+Excel bóc tách**, **file theo dõi hàng ngày** và **phần mềm quyết toán**.
 
-> Giai đoạn hiện tại **chưa ghi thật** vào file theo dõi hàng ngày — việc kiểm
-> tra và chỉnh sửa dữ liệu thực hiện trực tiếp trong Excel.
+Luồng gồm 4 bước, mỗi bước đúng **một nút bấm**:
+
+1. **Mở trợ lý quyết toán** — chạy file `.bat` mở GPT Custom để bóc tách chứng từ.
+2. **Xem file bóc tách dữ liệu** — file tải về được **tự mở trong Excel**; nút này
+   mở lại file bất cứ lúc nào, kèm dòng **“Lưu lần cuối”** hiển thị đúng thời điểm
+   bạn bấm Lưu.
+3. **Nhập lên file hàng ngày** — lấy **bản lưu mới nhất** của file bóc tách và cập
+   nhật file theo dõi hàng ngày.
+4. **Nhập dữ liệu mới lên phần mềm quyết toán** — chạy file `.bat` khởi động luồng
+   **PAD RPA**.
+
+File bóc tách **giữ nguyên trong Downloads** và là bản gốc duy nhất bạn chỉnh sửa.
+Mỗi lần nhập ở Bước 3, phần mềm tự lưu một bản sao của đúng dữ liệu đã dùng vào
+thư mục Output để đối chiếu về sau.
 
 ---
 
@@ -59,6 +67,7 @@ File cấu hình mặc định nằm ở `D:\RPA_QuyetToan\Config\settings.json`
 {
   "app_root": "D:\\RPA_QuyetToan",
   "bat_path": "D:\\RPA_QuyetToan\\Launcher\\Mo_Tro_Ly_Quyet_Toan.bat",
+  "pad_bat_path": "D:\\RPA_QuyetToan\\Launcher\\Chay_PAD_Quyet_Toan.bat",
   "download_folder": "D:\\RPA_QuyetToan\\Downloads",
   "output_folder": "D:\\RPA_QuyetToan\\Outputs",
   "daily_tracking_file": "D:\\RPA_QuyetToan\\Daily\\file_theo_doi_hang_ngay.xlsx",
@@ -77,13 +86,21 @@ File cấu hình mặc định nằm ở `D:\RPA_QuyetToan\Config\settings.json`
 
 | Trường | Mô tả |
 | --- | --- |
-| `bat_path` | Đường dẫn file `.bat` mở trợ lý GPT Custom |
-| `download_folder` | Thư mục Chrome/GPT tải file về (được theo dõi); file gốc giữ nguyên tại đây |
-| `output_folder` | Thư mục lưu bản đã kiểm tra (sao chép khi bấm "Đã kiểm tra xong"), chia theo ngày |
-| `daily_tracking_file` | File theo dõi hàng ngày (giai đoạn này chưa ghi) |
+| `bat_path` | Đường dẫn file `.bat` mở trợ lý GPT Custom (Bước 1) |
+| `pad_bat_path` | Đường dẫn file `.bat` chạy luồng PAD RPA (Bước 4) |
+| `download_folder` | Thư mục Chrome/GPT tải file về (được theo dõi); file bóc tách giữ nguyên tại đây |
+| `output_folder` | Nơi lưu bản sao của dữ liệu đã dùng cho mỗi lần nhập, chia theo ngày |
+| `daily_tracking_file` | File theo dõi hàng ngày được cập nhật ở Bước 3 |
 | `allowed_extensions` | Các đuôi file được chấp nhận |
-| `output_file_patterns` | Mẫu tên file output cần bắt |
+| `output_file_patterns` | Mẫu tên file bóc tách cần bắt |
 | `download_stable_seconds` | Số giây tối thiểu để coi file đã tải xong |
+
+### File `.bat` chạy PAD RPA (Bước 4)
+
+Lần chạy đầu, phần mềm **tự tạo sẵn** file mẫu tại
+`D:\RPA_QuyetToan\Launcher\Chay_PAD_Quyet_Toan.bat`. Hãy mở file đó và **điền lệnh
+gọi flow PAD của bạn** vào (xóa phần cảnh báo mặc định). Nếu file `.bat` chưa được
+điền, khi chạy nó chỉ hiện thông báo nhắc cấu hình chứ không làm gì.
 
 Bạn cũng có thể chỉnh các đường dẫn ngay trên giao diện, tại tab **Cài đặt**,
 rồi bấm **Lưu cấu hình**.
@@ -101,24 +118,32 @@ rồi bấm **Lưu cấu hình**.
 
 ## 7. Các bước sử dụng
 
-Mọi thao tác hằng ngày nằm ở tab **Chức năng**, theo 2 bước:
+Mọi thao tác hằng ngày nằm ở tab **Chức năng**, theo 4 bước, mỗi bước một nút:
 
-Bạn có thể bỏ qua Bước 1 và bấm **Chọn file có sẵn** ở Bước 2 để dùng lại một
-file `.xlsx`, `.xlsm` hoặc `.csv` cũ. File được chọn sẽ được ghi nhận để kiểm tra
-và xác nhận như file vừa tải từ trợ lý.
+1. **Bước 1 — Mở trợ lý quyết toán.** Bấm nút (chạy file `.bat`), gửi chứng từ
+   lên **GPT Custom** và chờ bóc tách xong, rồi **tải file Excel về**
+   (Chrome lưu vào `Downloads`).
+2. **Bước 2 — Xem file bóc tách dữ liệu.** Phần mềm tự phát hiện file mới và
+   **tự mở trong Excel**. Kiểm tra/chỉnh sửa dữ liệu rồi **lưu (Ctrl+S) và đóng
+   file**. Bấm nút này để mở lại file bất cứ lúc nào; dòng **“Lưu lần cuối”**
+   ngay dưới nút cho biết bản hiện tại được lưu lúc nào.
+3. **Bước 3 — Nhập lên file hàng ngày.** Phần mềm lấy **bản lưu mới nhất** của
+   file bóc tách, tự ghép Phiếu cân với Bill theo container, tạo/cập nhật SQT PM
+   và ghép khoản chi theo Ngày tháng + Container.
+   - Hãy **đóng file bóc tách trong Excel** trước khi bấm, nếu không phần mềm sẽ
+     nhắc (file đang mở thì bản trên đĩa có thể chưa phải bản mới nhất).
+   - Trước khi nhập, một bản sao của dữ liệu đang dùng được lưu vào
+     `Outputs\YYYY-MM-DD\` để đối chiếu về sau.
+   - Nếu một container có nhiều Bill, phần mềm yêu cầu chọn Bill đúng.
+   - Chứng từ đã xử lý được nhận diện bằng MD5 và không bị nhập trùng.
+   - Dữ liệu chưa đủ điều kiện được **hiện ra ngay sau khi nhập** để bạn bổ sung;
+     phần còn lại sẽ tự được thử ghép lại ở những lần nhập sau.
+4. **Bước 4 — Nhập dữ liệu mới lên phần mềm quyết toán.** Bấm nút, xác nhận, phần
+   mềm chạy file `.bat` khởi động luồng **PAD RPA**. Trong lúc RPA chạy, không
+   dùng chuột/bàn phím và không mở phần mềm quyết toán bằng tay.
 
-1. **Bước 1** — Bấm **Mở trợ lý quyết toán** (chạy file `.bat`), gửi dữ liệu
-   lên **GPT Custom** và chờ xử lý.
-2. **Tải file output** về (Chrome lưu vào `Downloads`).
-3. Phần mềm tự phát hiện và **tự mở file trong Excel**. File gốc **giữ nguyên
-   trong Downloads**.
-4. **Bước 2** — Kiểm tra/chỉnh sửa toàn bộ dữ liệu và trạng thái nhập cho từng
-   dòng ngay trong Excel, sau đó **lưu và đóng file**.
-5. Bấm **Đã kiểm tra xong** ở thẻ Bước 2 → phần mềm **sao chép một bản vào
-   `Outputs\YYYY-MM-DD\`** và chuyển trạng thái **Đã kiểm tra & hoàn tất**.
-   File gốc vẫn được giữ nguyên trong thư mục ban đầu.
-   - Nếu lỡ đóng file, bấm **Mở lại file** để mở lại.
-   - Nếu file còn đang mở trong Excel, app sẽ nhắc lưu và đóng trước.
+Không cần chọn file thủ công: khi mở lại app, phần mềm tự nhận lại file bóc tách
+đang dùng dở, hoặc file bóc tách mới nhất trong thư mục tải về.
 
 Tab **Cài đặt** chứa các đường dẫn/thư mục, lịch sử xử lý và nhật ký.
 
@@ -128,9 +153,9 @@ Tab **Cài đặt** chứa các đường dẫn/thư mục, lịch sử xử lý
 D:\RPA_QuyetToan
 ├── App\           QuyetToanAssistant.exe (khi đóng gói)
 ├── Config\        settings.json
-├── Launcher\      Mo_Tro_Ly_Quyet_Toan.bat
-├── Downloads\     Nơi Chrome/GPT tải file về; file gốc giữ nguyên tại đây
-├── Outputs\       Bản đã kiểm tra (sao chép khi bấm "Đã kiểm tra xong"), chia theo ngày
+├── Launcher\      Mo_Tro_Ly_Quyet_Toan.bat, Chay_PAD_Quyet_Toan.bat
+├── Downloads\     Nơi Chrome/GPT tải file về; file bóc tách giữ nguyên tại đây
+├── Outputs\       Bản sao dữ liệu đã dùng cho mỗi lần nhập, chia theo ngày
 ├── Daily\         file_theo_doi_hang_ngay.xlsx
 ├── Database\      app_state.db
 └── Logs\          app_YYYYMMDD.log
@@ -146,7 +171,9 @@ project/
 └── app/
     ├── __init__.py
     ├── config.py           Nạp/lưu settings.json, tạo thư mục
-    ├── database.py         SQLite: processed_files
+    ├── database.py         SQLite: file đã xử lý, MD5 và dữ liệu chờ
+    ├── daily_import.py     Đọc, match và ghi file quyết toán hàng ngày
+    ├── daily_import_ui.py  Hộp chọn Bill và quản lý dữ liệu chờ
     ├── file_utils.py       Kiểm tra khóa, chờ tải xong, hash, sao chép sang Output
     ├── watcher.py          Theo dõi Downloads bằng watchdog
     ├── logger_setup.py     Cấu hình logging
@@ -165,14 +192,42 @@ File `.exe` sẽ nằm trong thư mục `dist\QuyetToanAssistant\`.
 
 ## 11. Ghi chú vận hành
 
-- File tải về **giữ nguyên trong Downloads**; phần mềm **không tự xóa/di chuyển**
-  file này.
-- Mỗi file chỉ có **một bản trong Output**: nếu bạn kiểm tra & xác nhận lại cùng
-  một file, phần mềm **không tạo thêm file mới** mà **thay bản cũ** bằng bản mới
-  (tên đặt lại theo mốc thời gian mới nhất). Các file tải về khác nhau vẫn có bản
-  Output riêng.
+- File bóc tách **giữ nguyên trong Downloads**; phần mềm **không tự xóa/di chuyển**
+  file này. Bạn sửa và lưu trực tiếp trên nó.
+- Mỗi lần bấm **Nhập lên file hàng ngày**, một bản sao của dữ liệu đang dùng được
+  lưu vào `Outputs\YYYY-MM-DD\` (đặt tên theo mốc thời gian) để đối chiếu về sau.
 - Dùng giờ local của Windows (không dùng UTC).
-- Có thể tắt/mở lại app bất kỳ lúc nào; file gần nhất được khôi phục trên giao diện.
-- Khi có file mới, phần mềm tự mở file trong Excel; bạn kiểm tra/chỉnh sửa xong,
-  lưu và đóng file rồi bấm **Đã kiểm tra xong** để lưu bản vào Output.
+- Có thể tắt/mở lại app bất kỳ lúc nào; phần mềm tự nhận lại file bóc tách đang
+  dùng, hoặc file mới nhất trong thư mục tải về.
+- Chỉ các dòng có **Trạng thái kiểm tra = OK** và **Trạng thái nhập = Chưa nhập**
+  mới đủ điều kiện cho luồng RPA ở Bước 4.
 - Mọi lỗi được ghi vào log tại `D:\RPA_QuyetToan\Logs\app_YYYYMMDD.log`.
+
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+
+$ChromePaths = @(
+  "C:\Program Files\Google\Chrome\Application\chrome.exe",
+  "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+  "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
+)
+
+$Chrome = $ChromePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+if (-not $Chrome) {
+  Write-Host "Không tìm thấy Chrome. Cần cài Google Chrome trước."
+  exit
+}
+
+$ProfileDir = "D:\RPA_ChatGPT_Profile"
+
+if (-not (Test-Path $ProfileDir)) {
+  New-Item -ItemType Directory -Path $ProfileDir | Out-Null
+}
+
+Start-Process $Chrome -ArgumentList @(
+  "--user-data-dir=$ProfileDir",
+  "--profile-directory=Default",
+  "https://chatgpt.com"
+)
