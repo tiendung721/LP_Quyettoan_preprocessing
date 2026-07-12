@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QTableWidget,
@@ -27,16 +29,25 @@ from PySide6.QtWidgets import (
 )
 
 from .daily_import import (
-    BillChoiceRequest,
+    DOC_BILL,
+    DOC_EXPENSE,
+    DOC_SCALE,
+    DailyImportError,
     FieldConflict,
-    STATE_IGNORED,
-    STATE_LABELS,
-    normalize_cargo,
-    normalize_container,
+    UnmatchedRow,
+    classify_doc_type,
+    extract_summary,
+    load_extract_payload,
+    match_date_of,
     parse_date,
     parse_number,
+    save_extract_payload,
 )
-from .database import Database
+
+# Dòng lỗi (chưa nhập được) và dòng cần soát lại được tô nền để nhìn ra ngay.
+ERROR_BG = QColor("#FEE2E2")
+ERROR_FG = QColor("#B91C1C")
+WARN_BG = QColor("#FEF3C7")
 
 
 def _display_date(value: Any) -> str:
@@ -47,6 +58,64 @@ def _display_date(value: Any) -> str:
         return datetime.strptime(parsed, "%Y-%m-%d").strftime("%d/%m/%Y")
     except ValueError:
         return str(value or "")
+
+
+def _display_number(value: Any, decimals: int = 0) -> str:
+    """Số theo cách viết Việt Nam: 49.572.000 (tiền) hoặc 27,83 (tấn)."""
+    number = parse_number(value)
+    if number is None:
+        return ""
+    text = f"{number:,.{decimals}f}"
+    return text.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
+
+
+def _display_value(value: Any) -> str:
+    """Giá trị thô của một trường JSON để đưa vào ô nhập."""
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, indent=2)
+    return str(value)
+
+
+def _main_info(doc_type: str, row: Dict[str, Any]) -> str:
+    """Thông tin nhận dạng chính của một dòng; thiếu thì để trống."""
+    parts: List[str] = []
+    if doc_type == DOC_EXPENSE:
+        if row.get("so_hd"):
+            parts.append(f"HĐ {row['so_hd']}")
+        unit_price = _display_number(row.get("don_gia"))
+        if unit_price:
+            parts.append(f"ĐG {unit_price}")
+    elif doc_type == DOC_SCALE:
+        if row.get("so_chi_seal"):
+            parts.append(f"Seal {row['so_chi_seal']}")
+        elif row.get("bien_so_xe"):
+            parts.append(f"Xe {row['bien_so_xe']}")
+    elif doc_type == DOC_BILL:
+        if row.get("so_bill"):
+            parts.append(f"Bill {row['so_bill']}")
+        elif row.get("ten_tau"):
+            parts.append(str(row["ten_tau"]))
+    return "  •  ".join(parts)
+
+
+def _amount_info(doc_type: str, row: Dict[str, Any]) -> str:
+    """Cột “Số tấn / Tổng tiền” tùy theo loại chứng từ."""
+    tons = _display_number(row.get("so_tan"), 2)
+    if doc_type == DOC_SCALE:
+        return f"{tons} tấn" if tons else ""
+    if doc_type == DOC_EXPENSE:
+        return _display_number(row.get("tong_tien"))
+    if doc_type == DOC_BILL:
+        return f"{tons} tấn" if tons else _display_number(row.get("tong_tien"))
+    return ""
+
+
+def _warning_count(value: Any) -> int:
+    if isinstance(value, list):
+        return len(value)
+    return 0 if value in (None, "") else 1
 
 
 class FunctionWorker(QObject):
@@ -67,8 +136,8 @@ class FunctionWorker(QObject):
             self.failed.emit(str(exc))
 
 
-class JsonExtractDialog(QDialog):
-    """Dialog kiểm tra/sửa dữ liệu bóc tách JSON trước khi nhập file theo dõi."""
+class _EditExtractRowDialog(QDialog):
+    """Form chi tiết một dòng bóc tách: sửa đúng các trường của schema JSON."""
 
     FIELDS = [
         ("stt_hien_thi", "STT hiển thị"),
@@ -109,154 +178,69 @@ class JsonExtractDialog(QDialog):
     }
     STRUCTURED_DEFAULTS = {"truong_khac": {}, "canh_bao": []}
 
-    def __init__(self, path: str, parent=None):
+    def __init__(self, row: Dict[str, Any], reason: str = "", parent=None):
         super().__init__(parent)
-        self.path = path
-        self.payload: Dict[str, Any] = {}
-        self.rows: List[Dict[str, Any]] = []
-        self.current_index = -1
-        self.saved = False
-        self._dirty = False
-        self._loading = False
+        self.row = row
+        self.editors: Dict[str, QWidget] = {}
+        self._updated: Dict[str, Any] = dict(row)
 
-        self._load_file()
-
-        self.setWindowTitle("Kiểm tra dữ liệu bóc tách")
-        self.resize(860, 640)
-        self.setMinimumSize(680, 460)
+        self.setWindowTitle("Sửa dòng bóc tách")
+        self.resize(620, 700)
+        self.setMinimumSize(520, 420)
 
         layout = QVBoxLayout(self)
 
-        title = QLabel(path)
-        title.setObjectName("metaText")
-        title.setWordWrap(True)
-        title.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(title)
+        if reason:
+            note = QLabel(f"Dòng này chưa nhập được: {reason}")
+            note.setObjectName("noteText")
+            note.setWordWrap(True)
+            layout.addWidget(note)
 
-        row_picker = QHBoxLayout()
-        row_picker.addWidget(QLabel("Dòng dữ liệu:"))
-        self.row_combo = QComboBox()
-        self.row_combo.currentIndexChanged.connect(self._on_row_changed)
-        row_picker.addWidget(self.row_combo, stretch=1)
-        layout.addLayout(row_picker)
+        form_host = QWidget()
+        form = QFormLayout(form_host)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form.setLabelAlignment(Qt.AlignRight)
+        form.setContentsMargins(4, 4, 12, 4)
+        form.setSpacing(8)
+        for key, label in self.FIELDS:
+            value = _display_value(row.get(key))
+            if key in self.STRUCTURED_DEFAULTS:
+                editor: QWidget = QPlainTextEdit(value)
+                editor.setMinimumHeight(90)
+            else:
+                editor = QLineEdit(value)
+            form.addRow(label + ":", editor)
+            self.editors[key] = editor
 
-        self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["Tên trường", "Dữ liệu"])
-        self.table.setAlternatingRowColors(True)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.table.verticalHeader().setVisible(False)
-        self.table.itemChanged.connect(lambda _item: self._mark_dirty())
-        layout.addWidget(self.table, stretch=1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(form_host)
+        layout.addWidget(scroll, stretch=1)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Close)
-        buttons.button(QDialogButtonBox.Save).setText("Lưu")
-        buttons.button(QDialogButtonBox.Close).setText("Đóng")
-        buttons.button(QDialogButtonBox.Save).clicked.connect(self.save)
-        buttons.rejected.connect(self.accept)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Save).setText("Xong")
+        buttons.button(QDialogButtonBox.Cancel).setText("Hủy")
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-        self._populate_rows()
-
-    def _load_file(self) -> None:
+    @Slot()
+    def _on_accept(self) -> None:
+        updated = dict(self.row)
         try:
-            with open(self.path, "r", encoding="utf-8-sig") as f:
-                payload = json.load(f)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"File JSON không hợp lệ: {exc}") from exc
-        except UnicodeDecodeError as exc:
-            raise ValueError("File JSON không đọc được bằng UTF-8.") from exc
-        except OSError as exc:
-            raise ValueError(f"Không đọc được file JSON: {exc}") from exc
-
-        if not isinstance(payload, dict):
-            raise ValueError("File JSON phải có object gốc.")
-        rows = payload.get("du_lieu_boc_tach")
-        if not isinstance(rows, list):
-            raise ValueError("File JSON thiếu mảng 'du_lieu_boc_tach'.")
-        if any(not isinstance(row, dict) for row in rows):
-            raise ValueError("Mỗi dòng trong 'du_lieu_boc_tach' phải là object JSON.")
-
-        self.payload = payload
-        self.rows = [dict(row) for row in rows]
-
-    def _populate_rows(self) -> None:
-        self._loading = True
-        self.row_combo.clear()
-        for index, row in enumerate(self.rows, start=1):
-            self.row_combo.addItem(self._row_label(index, row), index - 1)
-        self.row_combo.setEnabled(bool(self.rows))
-        self._loading = False
-        if self.rows:
-            self.current_index = 0
-            self._load_row(0)
-        else:
-            self.current_index = -1
-            self.table.setRowCount(0)
-
-    @staticmethod
-    def _row_label(index: int, row: Dict[str, Any]) -> str:
-        parts = [
-            str(row.get("loai_chung_tu") or "Chứng từ"),
-            str(row.get("so_container") or "").strip(),
-            str(row.get("file_nguon") or "").strip(),
-        ]
-        suffix = " | ".join(part for part in parts if part)
-        return f"{index}. {suffix}" if suffix else f"{index}. Dòng bóc tách"
-
-    def _load_row(self, row_index: int) -> None:
-        self._loading = True
-        row = self.rows[row_index]
-        self.table.setRowCount(len(self.FIELDS))
-        for table_row, (key, label) in enumerate(self.FIELDS):
-            name_item = QTableWidgetItem(label)
-            name_item.setData(Qt.UserRole, key)
-            name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
-            value_item = QTableWidgetItem(self._display_value(row.get(key)))
-            self.table.setItem(table_row, 0, name_item)
-            self.table.setItem(table_row, 1, value_item)
-        self._loading = False
-        self._dirty = False
-
-    @staticmethod
-    def _display_value(value: Any) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, (dict, list)):
-            return json.dumps(value, ensure_ascii=False, indent=2)
-        return str(value)
-
-    def _on_row_changed(self, index: int) -> None:
-        if self._loading or index < 0:
-            return
-        target = int(self.row_combo.itemData(index))
-        previous = self.current_index
-        if previous >= 0 and not self._store_current_row():
-            self.row_combo.blockSignals(True)
-            self.row_combo.setCurrentIndex(previous)
-            self.row_combo.blockSignals(False)
-            return
-        self.current_index = target
-        self._load_row(target)
-
-    def _store_current_row(self) -> bool:
-        if self.current_index < 0 or self.current_index >= len(self.rows):
-            return True
-        updated = dict(self.rows[self.current_index])
-        try:
-            for table_row in range(self.table.rowCount()):
-                name_item = self.table.item(table_row, 0)
-                value_item = self.table.item(table_row, 1)
-                if name_item is None:
-                    continue
-                key = str(name_item.data(Qt.UserRole) or "")
-                text = value_item.text() if value_item else ""
+            for key, editor in self.editors.items():
+                text = (
+                    editor.toPlainText()
+                    if isinstance(editor, QPlainTextEdit)
+                    else editor.text()
+                )
                 updated[key] = self._parse_value(key, text)
         except ValueError as exc:
             QMessageBox.warning(self, "Dữ liệu chưa hợp lệ", str(exc))
-            return False
-        self.rows[self.current_index] = updated
-        return True
+            return
+        self._updated = updated
+        self.accept()
 
     def _parse_value(self, key: str, text: str) -> Any:
         value = text.strip()
@@ -285,148 +269,353 @@ class JsonExtractDialog(QDialog):
             return parsed
         return value
 
-    def _mark_dirty(self) -> None:
-        if not self._loading:
-            self._dirty = True
+    def updated_row(self) -> Dict[str, Any]:
+        return self._updated
+
+
+class JsonExtractDialog(QDialog):
+    """Bước 2: xem cả lô bóc tách dạng bảng, sửa/xóa từng dòng rồi lưu lại.
+
+    ``error_rows`` là các dòng Bước 3 không ghép được ({vị trí trong
+    du_lieu_boc_tach: lý do}); các dòng này được tô đỏ kèm lý do để người dùng
+    sửa hoặc xóa ngay tại đây.
+    """
+
+    COLUMNS = [
+        "STT",
+        "Loại chứng từ",
+        "File nguồn",
+        "Container",
+        "Ngày dùng để ghép",
+        "Thông tin chính",
+        "Số tấn / Tổng tiền",
+        "Trạng thái",
+    ]
+
+    def __init__(
+        self,
+        path: str,
+        parent=None,
+        error_rows: Optional[Dict[int, str]] = None,
+    ):
+        super().__init__(parent)
+        self.path = path
+        self.payload: Dict[str, Any] = load_extract_payload(path)
+        self.rows: List[Dict[str, Any]] = [
+            dict(row) for row in self.payload.get("du_lieu_boc_tach") or []
+        ]
+        # Lý do lỗi đi kèm từng dòng, giữ song song với self.rows để khi xóa dòng
+        # thì lý do không bị lệch vị trí.
+        self.row_errors: List[str] = [
+            str((error_rows or {}).get(index, "")) for index in range(len(self.rows))
+        ]
+        self.saved = False
+        self._dirty = False
+
+        self.setWindowTitle("Kiểm tra dữ liệu bóc tách")
+        self.resize(1160, 660)
+        self.setMinimumSize(900, 480)
+
+        layout = QVBoxLayout(self)
+
+        title = QLabel(path)
+        title.setObjectName("metaText")
+        title.setWordWrap(True)
+        title.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(title)
+
+        self.lbl_error_hint = QLabel()
+        self.lbl_error_hint.setObjectName("noteText")
+        self.lbl_error_hint.setWordWrap(True)
+        self.lbl_error_hint.setVisible(False)
+        layout.addWidget(self.lbl_error_hint)
+
+        summary = QFrame()
+        summary.setObjectName("guideBox")
+        summary_layout = QVBoxLayout(summary)
+        summary_layout.setContentsMargins(12, 10, 12, 10)
+        summary_layout.setSpacing(4)
+        self.lbl_summary = QLabel()
+        self.lbl_summary.setWordWrap(True)
+        self.lbl_types = QLabel()
+        self.lbl_types.setObjectName("metaText")
+        self.lbl_types.setWordWrap(True)
+        summary_layout.addWidget(self.lbl_summary)
+        summary_layout.addWidget(self.lbl_types)
+        layout.addWidget(summary)
+
+        self.table = QTableWidget(0, len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels(self.COLUMNS)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.doubleClicked.connect(self.edit_row)
+        layout.addWidget(self.table, stretch=1)
+
+        buttons = QHBoxLayout()
+        btn_edit = QPushButton("Sửa dòng")
+        btn_delete = QPushButton("Xóa dòng")
+        btn_save = QPushButton("Lưu")
+        btn_save.setProperty("variant", "primary")
+        btn_close = QPushButton("Đóng")
+        btn_edit.clicked.connect(self.edit_row)
+        btn_delete.clicked.connect(self.delete_row)
+        btn_save.clicked.connect(self.save)
+        btn_close.clicked.connect(self.reject)
+        buttons.addWidget(btn_edit)
+        buttons.addWidget(btn_delete)
+        buttons.addStretch(1)
+        buttons.addWidget(btn_save)
+        buttons.addWidget(btn_close)
+        layout.addLayout(buttons)
+
+        self._refresh()
+        if self.rows:
+            self.table.selectRow(self._first_error_row())
+
+    # ------------------------------------------------------------------ #
+    # Hiển thị
+    # ------------------------------------------------------------------ #
+    def _refresh(self) -> None:
+        error_indexes = {
+            index for index, reason in enumerate(self.row_errors) if reason
+        }
+        counts = extract_summary(
+            self.rows, self.payload.get("canh_bao"), error_indexes
+        )
+        self.lbl_summary.setText(
+            f"Tổng số file: {counts['files']}     •     "
+            f"Tổng số dòng bóc tách: {counts['total']}     •     "
+            f"Dòng OK: {counts['ok']}     •     "
+            f"Cần kiểm tra: {counts['need_check']}     •     "
+            f"Cảnh báo: {counts['warnings']}"
+        )
+        self.lbl_types.setText(
+            f"Khoản chi: {counts[DOC_EXPENSE]}     •     "
+            f"Phiếu cân: {counts[DOC_SCALE]}     •     "
+            f"Bill: {counts[DOC_BILL]}     •     "
+            f"Loại khác: {counts['other']}"
+        )
+        self.lbl_error_hint.setVisible(bool(error_indexes))
+        if error_indexes:
+            self.lbl_error_hint.setText(
+                f"{len(error_indexes)} dòng chưa nhập được (tô đỏ bên dưới). Hãy sửa "
+                "lại hoặc xóa dòng đó, bấm “Lưu” rồi nhập lại ở Bước 3."
+            )
+
+        self.table.setRowCount(len(self.rows))
+        for index, row in enumerate(self.rows):
+            reason = self.row_errors[index]
+            doc_type = classify_doc_type(row.get("loai_chung_tu"))
+            warnings = _warning_count(row.get("canh_bao"))
+            needs_check = bool(row.get("trang_thai")) and str(
+                row.get("trang_thai")
+            ).strip().upper() != "OK"
+            for col, text in enumerate(self._row_cells(index, row, doc_type)):
+                item = QTableWidgetItem(text)
+                item.setToolTip(self._row_tooltip(row, reason))
+                if reason:
+                    item.setBackground(ERROR_BG)
+                    item.setForeground(ERROR_FG)
+                elif needs_check or warnings:
+                    item.setBackground(WARN_BG)
+                self.table.setItem(index, col, item)
+
+    def _row_cells(
+        self, index: int, row: Dict[str, Any], doc_type: str
+    ) -> List[str]:
+        stt = row.get("stt_hien_thi")
+        return [
+            str(stt if stt not in (None, "") else index + 1),
+            str(row.get("loai_chung_tu") or "—"),
+            str(row.get("file_nguon") or ""),
+            str(row.get("so_container") or ""),
+            _display_date(match_date_of(row)),
+            _main_info(doc_type, row),
+            _amount_info(doc_type, row),
+            self._status_text(index, row),
+        ]
+
+    def _status_text(self, index: int, row: Dict[str, Any]) -> str:
+        if self.row_errors[index]:
+            return self.row_errors[index]
+        status = str(row.get("trang_thai") or "").strip() or "OK"
+        warnings = _warning_count(row.get("canh_bao"))
+        return f"{status} • {warnings} cảnh báo" if warnings else status
+
+    @staticmethod
+    def _row_tooltip(row: Dict[str, Any], reason: str) -> str:
+        lines = []
+        if reason:
+            lines.append(f"Chưa nhập được: {reason}")
+        lines.append(f"File nguồn: {row.get('file_nguon') or '—'}")
+        warnings = row.get("canh_bao")
+        if isinstance(warnings, list) and warnings:
+            lines.append("Cảnh báo: " + json.dumps(warnings, ensure_ascii=False))
+        return "\n".join(lines)
+
+    def _first_error_row(self) -> int:
+        for index, reason in enumerate(self.row_errors):
+            if reason:
+                return index
+        return 0
+
+    def _selected_index(self) -> Optional[int]:
+        index = self.table.currentRow()
+        if index < 0 or index >= len(self.rows):
+            QMessageBox.information(
+                self, "Chưa chọn dòng", "Hãy chọn một dòng trong bảng trước."
+            )
+            return None
+        return index
+
+    # ------------------------------------------------------------------ #
+    # Thao tác
+    # ------------------------------------------------------------------ #
+    @Slot()
+    def edit_row(self) -> None:
+        index = self._selected_index()
+        if index is None:
+            return
+        dialog = _EditExtractRowDialog(self.rows[index], self.row_errors[index], self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self.rows[index] = dialog.updated_row()
+        # Dòng vừa sửa coi như đã xử lý; Bước 3 sẽ chấm lại khi nhập.
+        self.row_errors[index] = ""
+        self._dirty = True
+        self._refresh()
+        self.table.selectRow(index)
+
+    @Slot()
+    def delete_row(self) -> None:
+        index = self._selected_index()
+        if index is None:
+            return
+        row = self.rows[index]
+        answer = QMessageBox.question(
+            self,
+            "Xóa dòng",
+            "Xóa dòng này khỏi dữ liệu bóc tách?\n\n"
+            f"{row.get('loai_chung_tu') or 'Chứng từ'} • "
+            f"{row.get('so_container') or '—'} • {row.get('file_nguon') or '—'}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self.rows.pop(index)
+        self.row_errors.pop(index)
+        self._dirty = True
+        self._refresh()
+        if self.rows:
+            self.table.selectRow(min(index, len(self.rows) - 1))
 
     @Slot()
     def save(self) -> None:
-        if not self._store_current_row():
-            return
+        """Lưu xong là đóng luôn.
+
+        Không hiện thêm hộp thoại “đã lưu” bắt người dùng tắt: dòng “Lưu thành công
+        lần cuối” ở Bước 2 tự cập nhật, thế là đủ báo thành công.
+        """
         self.payload["du_lieu_boc_tach"] = self.rows
         try:
-            with open(self.path, "w", encoding="utf-8") as f:
-                json.dump(self.payload, f, ensure_ascii=False, indent=2)
-                f.write("\n")
-        except OSError as exc:
+            save_extract_payload(self.path, self.payload)
+        except DailyImportError as exc:
             QMessageBox.critical(self, "Không lưu được JSON", str(exc))
             return
         self.saved = True
         self._dirty = False
-        QMessageBox.information(self, "Đã lưu", "Đã lưu dữ liệu bóc tách JSON.")
+        self.accept()
+
+    def reject(self) -> None:  # noqa: N802 - override Qt
+        if self._dirty:
+            answer = QMessageBox.question(
+                self,
+                "Chưa lưu thay đổi",
+                "Bạn đã sửa dữ liệu nhưng chưa bấm “Lưu”. Đóng và bỏ các thay đổi?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+        super().reject()
 
 
-class BillSelectionDialog(QDialog):
-    """Popup chọn Bill và/hoặc dòng quyết toán khi dữ liệu bị mơ hồ."""
+class UnmatchedRowsDialog(QDialog):
+    """Popup khi có dòng không ghép được: sửa lại ở Bước 2, hoặc bỏ dòng lỗi."""
 
-    def __init__(self, requests: List[BillChoiceRequest], parent=None):
+    BACK_TO_REVIEW = "REVIEW"
+    DROP_ERRORS = "DROP"
+
+    def __init__(self, rows: List[UnmatchedRow], parent=None):
         super().__init__(parent)
-        self.requests = requests
-        self.combos: Dict[str, QComboBox] = {}
-        self.target_combos: Dict[str, QComboBox] = {}
-        self.setWindowTitle("Chọn dữ liệu phù hợp")
-        self.resize(1180, 460)
+        # Đóng cửa sổ bằng dấu X = không nhập gì thêm, quay lại kiểm tra.
+        self.choice = self.BACK_TO_REVIEW
+        self.setWindowTitle("Có dòng chưa nhập được")
+        self.resize(880, 420)
 
         layout = QVBoxLayout(self)
         hint = QLabel(
-            "Một số container khớp nhiều Bill hoặc nhiều dòng quyết toán. "
-            "Hãy chọn Bill và SQT đúng; nếu chưa chắc, chọn “Để xử lý sau”."
+            f"{len(rows)} dòng không ghép được với dữ liệu quyết toán nên chưa được "
+            "nhập. Các dòng còn lại vẫn nhập bình thường."
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
-        table = QTableWidget(len(requests), 6)
+        table = QTableWidget(len(rows), 5)
         table.setHorizontalHeaderLabels(
             [
+                "Loại chứng từ",
                 "Container",
-                "Ngày đóng",
-                "Số tấn",
-                "Loại hàng",
-                "Bill được chọn",
-                "Dòng quyết toán",
+                "Ngày dùng để ghép",
+                "Số HĐ/Bill/Seal",
+                "Lý do",
             ]
         )
         table.setAlternatingRowColors(True)
         table.setSelectionMode(QTableWidget.NoSelection)
         table.setEditTriggers(QTableWidget.NoEditTriggers)
-        for row_index, request in enumerate(requests):
-            table.setItem(row_index, 0, QTableWidgetItem(request.container))
-            table.setItem(row_index, 1, QTableWidgetItem(_display_date(request.close_date)))
-            table.setItem(
-                row_index,
-                2,
-                QTableWidgetItem("" if request.tons is None else f"{request.tons:g}"),
-            )
-            table.setItem(row_index, 3, QTableWidgetItem(request.cargo))
-            combo = QComboBox()
-            if request.candidates:
-                if len(request.candidates) > 1:
-                    combo.addItem("Để xử lý sau", "__SKIP__")
-                    combo.addItem("Bỏ qua container này", "__IGNORE__")
-                for candidate in request.candidates:
-                    label = " | ".join(
-                        part
-                        for part in (
-                            candidate.bill_no or "Không có số Bill",
-                            candidate.vessel,
-                            _display_date(candidate.sail_date),
-                            candidate.carrier,
-                        )
-                        if part
-                    )
-                    combo.addItem(label, candidate.md5)
-                    combo.setItemData(
-                        combo.count() - 1,
-                        f"File: {candidate.source_name}\nMD5: {candidate.md5 or '—'}\n"
-                        f"Seal: {candidate.seal or '—'}",
-                        Qt.ToolTipRole,
-                    )
-            else:
-                combo.addItem("Không có Bill để chọn", "__NO_BILL__")
-                combo.setEnabled(False)
-            table.setCellWidget(row_index, 4, combo)
-            self.combos[request.subject_key] = combo
-
-            target_combo = QComboBox()
-            if request.target_candidates:
-                if len(request.target_candidates) > 1:
-                    target_combo.addItem("Để xử lý sau", "__SKIP__")
-                for candidate in request.target_candidates:
-                    label = " | ".join(
-                        part
-                        for part in (
-                            f"SQT {candidate.sqt}",
-                            f"Dòng {candidate.row_number}" if candidate.row_number else "",
-                            _display_date(candidate.close_date),
-                            candidate.cargo,
-                            candidate.vessel,
-                        )
-                        if part
-                    )
-                    target_combo.addItem(label, f"sqt:{candidate.sqt}")
-                if request.allow_new_target:
-                    target_combo.addItem("Tạo dòng quyết toán mới", "__NEW__")
-            else:
-                target_combo.addItem("Tạo dòng quyết toán mới", "__NEW__")
-                target_combo.setEnabled(False)
-            table.setCellWidget(row_index, 5, target_combo)
-            self.target_combos[request.target_subject_key] = target_combo
+        table.verticalHeader().setVisible(False)
+        for index, row in enumerate(rows):
+            values = [
+                row.doc_label,
+                row.container,
+                _display_date(row.match_date),
+                row.reference,
+                row.reason,
+            ]
+            for col, value in enumerate(values):
+                table.setItem(index, col, QTableWidgetItem(str(value)))
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(table)
+        layout.addWidget(table, stretch=1)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
-            orientation=Qt.Horizontal,
-        )
-        buttons.button(QDialogButtonBox.Ok).setText("Tiếp tục")
-        buttons.button(QDialogButtonBox.Cancel).setText("Hủy toàn bộ")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        buttons = QHBoxLayout()
+        btn_drop = QPushButton("Hủy các dòng lỗi và nhập các dòng còn lại")
+        btn_review = QPushButton("Quay lại bước 2 để kiểm tra")
+        btn_review.setProperty("variant", "primary")
+        btn_review.setDefault(True)
+        btn_drop.clicked.connect(self._choose_drop)
+        btn_review.clicked.connect(self._choose_review)
+        buttons.addStretch(1)
+        buttons.addWidget(btn_drop)
+        buttons.addWidget(btn_review)
+        layout.addLayout(buttons)
 
-    def decisions(self) -> Dict[str, str]:
-        result = {
-            key: str(combo.currentData() or "__SKIP__")
-            for key, combo in self.combos.items()
-        }
-        result.update(
-            {
-                key: str(combo.currentData() or "__SKIP__")
-                for key, combo in self.target_combos.items()
-            }
-        )
-        return result
+    @Slot()
+    def _choose_review(self) -> None:
+        self.choice = self.BACK_TO_REVIEW
+        self.accept()
+
+    @Slot()
+    def _choose_drop(self) -> None:
+        self.choice = self.DROP_ERRORS
+        self.accept()
 
 
 class ConflictDialog(QDialog):
@@ -482,272 +671,3 @@ class ConflictDialog(QDialog):
         return {
             key: bool(combo.currentData()) for key, combo in self.combos.items()
         }
-
-
-class _EditPendingDialog(QDialog):
-    FIELDS = [
-        ("close_date", "Ngày đóng / Ngày tháng"),
-        ("container", "Số Container"),
-        ("tons", "Số tấn"),
-        ("cargo", "Loại hàng"),
-        ("place", "Nơi đóng"),
-        ("seal", "Số chì/Seal"),
-        ("vessel", "Tên tàu"),
-        ("sail_date", "Ngày chạy"),
-        ("carrier", "VT biển"),
-        ("invoice_no", "Số HĐ"),
-        ("material_price", "Giá vật liệu"),
-        ("unit_price", "Đơn giá"),
-        ("amount", "Thành tiền"),
-        ("vat", "VAT"),
-        ("total", "Tổng tiền"),
-    ]
-
-    def __init__(self, item: Dict[str, Any], parent=None):
-        super().__init__(parent)
-        self.item = item
-        self.edits: Dict[str, QLineEdit] = {}
-        self.setWindowTitle("Sửa dữ liệu chờ")
-        self.resize(560, 620)
-        self.setMinimumSize(460, 400)
-        layout = QVBoxLayout(self)
-
-        # Form đặt trong vùng cuộn để không bị chật/che khi có nhiều trường.
-        form_host = QWidget()
-        form = QFormLayout(form_host)
-        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        form.setLabelAlignment(Qt.AlignRight)
-        form.setContentsMargins(4, 4, 12, 4)
-        form.setSpacing(8)
-        data = item.get("data") or {}
-        for key, label in self.FIELDS:
-            value = data.get(key)
-            if key in ("close_date", "sail_date"):
-                value = _display_date(value)
-            edit = QLineEdit("" if value is None else str(value))
-            form.addRow(label + ":", edit)
-            self.edits[key] = edit
-        self.edit_sqt = QLineEdit(
-            "" if item.get("matched_sqt") is None else str(item.get("matched_sqt"))
-        )
-        form.addRow("Ghép vào SQT PM:", self.edit_sqt)
-        self.new_sqt_combo = QComboBox()
-        self.new_sqt_combo.addItem("Tự động tìm dòng phù hợp", False)
-        self.new_sqt_combo.addItem("Yêu cầu tạo SQT mới", True)
-        if data.get("force_new_sqt"):
-            self.new_sqt_combo.setCurrentIndex(1)
-        form.addRow("Cách xử lý:", self.new_sqt_combo)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setWidget(form_host)
-        layout.addWidget(scroll, stretch=1)
-
-        advanced = QLabel(
-            f"Loại dữ liệu: {item.get('document_type') or '—'}\n"
-            f"MD5: {item.get('document_md5') or '—'}"
-        )
-        advanced.setWordWrap(True)
-        advanced.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(advanced)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Save).setText("Lưu và kiểm tra lại")
-        buttons.button(QDialogButtonBox.Cancel).setText("Hủy")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def updated_data(self) -> Dict[str, Any]:
-        data = dict(self.item.get("data") or {})
-        for key, edit in self.edits.items():
-            value = edit.text().strip()
-            if key == "container":
-                data[key] = normalize_container(value)
-            elif key in ("close_date", "sail_date"):
-                data[key] = parse_date(value)
-            elif key in (
-                "tons",
-                "material_price",
-                "unit_price",
-                "amount",
-                "vat",
-                "total",
-            ):
-                data[key] = parse_number(value)
-            elif key == "cargo":
-                cargo, recognized = normalize_cargo(value)
-                data[key] = cargo
-                data["cargo_recognized"] = recognized
-            else:
-                data[key] = value
-        data["preferred_sqt"] = (
-            int(self.edit_sqt.text().strip())
-            if self.edit_sqt.text().strip().isdigit()
-            else None
-        )
-        data["force_new_sqt"] = bool(self.new_sqt_combo.currentData())
-        return data
-
-    def preferred_sqt(self) -> Optional[int]:
-        text = self.edit_sqt.text().strip()
-        return int(text) if text.isdigit() else None
-
-
-class PendingDataDialog(QDialog):
-    """Danh sách dữ liệu tạm; cho sửa, bỏ qua, khôi phục và match lại."""
-
-    def __init__(self, database: Database, parent=None):
-        super().__init__(parent)
-        self.database = database
-        self.retry_requested = False
-        self.items: List[Dict[str, Any]] = []
-        self.setWindowTitle("Dữ liệu chờ xử lý")
-        self.resize(1120, 600)
-
-        layout = QVBoxLayout(self)
-        top = QHBoxLayout()
-        top.addWidget(QLabel("Hiển thị:"))
-        self.filter_combo = QComboBox()
-        self.filter_combo.addItem("Tất cả dữ liệu chờ", "ACTIVE")
-        for state, label in STATE_LABELS.items():
-            self.filter_combo.addItem(label, state)
-        self.filter_combo.currentIndexChanged.connect(self.refresh)
-        top.addWidget(self.filter_combo)
-        top.addStretch(1)
-        layout.addLayout(top)
-
-        self.table = QTableWidget(0, 10)
-        self.table.setHorizontalHeaderLabels(
-            [
-                "Trạng thái",
-                "Loại",
-                "Ngày",
-                "Container",
-                "Số tấn",
-                "Loại hàng",
-                "Số Bill/HĐ",
-                "SQT chọn",
-                "Tàu",
-                "Ghi chú",
-            ]
-        )
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SingleSelection)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.setAlternatingRowColors(True)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.table)
-
-        row = QHBoxLayout()
-        btn_edit = QPushButton("Sửa dữ liệu")
-        btn_ignore = QPushButton("Bỏ qua")
-        btn_restore = QPushButton("Khôi phục")
-        btn_retry = QPushButton("Chạy match lại")
-        btn_close = QPushButton("Đóng")
-        btn_edit.clicked.connect(self.edit_selected)
-        btn_ignore.clicked.connect(self.ignore_selected)
-        btn_restore.clicked.connect(self.restore_selected)
-        btn_retry.clicked.connect(self.retry)
-        btn_close.clicked.connect(self.accept)
-        for button in (btn_edit, btn_ignore, btn_restore, btn_retry):
-            row.addWidget(button)
-        row.addStretch(1)
-        row.addWidget(btn_close)
-        layout.addLayout(row)
-        self.refresh()
-
-    def _selected(self) -> Optional[Dict[str, Any]]:
-        row = self.table.currentRow()
-        if row < 0 or row >= len(self.items):
-            QMessageBox.information(self, "Chưa chọn dữ liệu", "Hãy chọn một dòng trước.")
-            return None
-        return self.items[row]
-
-    @Slot()
-    def refresh(self) -> None:
-        selected_filter = str(self.filter_combo.currentData() or "ACTIVE")
-        include_completed = selected_filter not in ("ACTIVE",)
-        records = self.database.list_staged_rows(include_completed=include_completed)
-        if selected_filter == "ACTIVE":
-            records = [
-                item
-                for item in records
-                if item.get("state") not in ("COMPLETED", "IGNORED")
-            ]
-        elif selected_filter:
-            records = [item for item in records if item.get("state") == selected_filter]
-        self.items = records
-        self.table.setRowCount(len(records))
-        for row_index, item in enumerate(records):
-            data = item.get("data") or {}
-            values = [
-                STATE_LABELS.get(item.get("state"), item.get("state") or ""),
-                item.get("document_type") or "",
-                _display_date(data.get("close_date")),
-                data.get("container") or "",
-                "" if data.get("tons") is None else str(data.get("tons")),
-                data.get("cargo") or "",
-                data.get("bill_no") or data.get("invoice_no") or "",
-                item.get("matched_sqt") or data.get("preferred_sqt") or "",
-                data.get("vessel") or "",
-                item.get("note") or "",
-            ]
-            for col, value in enumerate(values):
-                table_item = QTableWidgetItem(str(value))
-                if item.get("state") in ("MISSING_DATA", "CONFLICT", "NEEDS_BILL_SELECTION"):
-                    table_item.setBackground(Qt.GlobalColor.yellow)
-                self.table.setItem(row_index, col, table_item)
-
-    @Slot()
-    def edit_selected(self) -> None:
-        item = self._selected()
-        if not item:
-            return
-        dialog = _EditPendingDialog(item, self)
-        if dialog.exec() == QDialog.Accepted:
-            self.database.update_staged_row(
-                int(item["id"]),
-                state="PENDING",
-                data=dialog.updated_data(),
-                matched_sqt=dialog.preferred_sqt() or 0,
-                note="Người dùng đã sửa; chờ chạy match lại.",
-            )
-            self.database.refresh_document_status(item.get("document_md5") or "")
-            self.refresh()
-
-    @Slot()
-    def ignore_selected(self) -> None:
-        item = self._selected()
-        if not item:
-            return
-        answer = QMessageBox.question(
-            self,
-            "Bỏ qua dữ liệu",
-            "Dữ liệu này sẽ không tự xuất hiện lại ở các lần nhập sau. Bạn vẫn có "
-            "thể khôi phục trong mục “Đã bỏ qua”. Tiếp tục?",
-        )
-        if answer == QMessageBox.Yes:
-            self.database.update_staged_row(
-                int(item["id"]), state=STATE_IGNORED, note="Người dùng đã bỏ qua."
-            )
-            self.database.refresh_document_status(item.get("document_md5") or "")
-            self.refresh()
-
-    @Slot()
-    def restore_selected(self) -> None:
-        item = self._selected()
-        if not item:
-            return
-        self.database.update_staged_row(
-            int(item["id"]), state="PENDING", note="Đã khôi phục để xử lý lại."
-        )
-        self.database.refresh_document_status(item.get("document_md5") or "")
-        self.refresh()
-
-    @Slot()
-    def retry(self) -> None:
-        self.retry_requested = True
-        self.accept()

@@ -2,7 +2,7 @@
 
 Bao gồm: kiểm tra file bị khóa, nhận diện file tạm khi tải, kiểm tra file
 hợp lệ theo cấu hình, chờ file tải xong (ổn định dung lượng), tính hash,
-sao chép file vào thư mục output chuẩn, mở file / mở thư mục.
+dọn file JSON tạm, mở file / mở thư mục.
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -154,9 +153,8 @@ def sha256_file(path: str, chunk_size: int = 1024 * 1024) -> str:
 def download_file_info(download_path: str) -> Dict:
     """Thu thập thông tin file vừa tải về mà KHÔNG di chuyển/sao lưu.
 
-    File tải về được giữ nguyên trong thư mục Downloads để người dùng mở và
-    chỉnh sửa trực tiếp. Chỉ khi người dùng xác nhận đã kiểm tra xong thì mới
-    tạo thêm một bản trong thư mục Output (xem ``copy_download_to_output``).
+    File JSON tải về là bộ nhớ tạm của một lô bóc tách: nó nằm nguyên trong thư
+    mục Downloads để người dùng xem/sửa ở Bước 2 và để Bước 3 đọc trực tiếp.
 
     Trả về dict thông tin file đang làm việc (chính là file trong Downloads).
     """
@@ -174,32 +172,31 @@ def download_file_info(download_path: str) -> Dict:
     }
 
 
-def copy_download_to_output(download_path: str, output_folder: str) -> str:
-    """Sao chép file (đã kiểm tra xong) từ Downloads sang thư mục Output.
+def is_in_folder(path: str, folder: str) -> bool:
+    """True nếu ``path`` nằm ngay trong ``folder`` (so sánh không phân biệt hoa/thường)."""
+    if not path or not folder:
+        return False
+    try:
+        parent = os.path.abspath(os.path.dirname(path))
+        target = os.path.abspath(folder)
+    except (OSError, ValueError):
+        return False
+    return os.path.normcase(parent) == os.path.normcase(target)
 
-    - Giữ nguyên file gốc trong Downloads; chỉ tạo thêm một bản trong Output.
-    - Bản Output lưu vào ``output_folder\\YYYY-MM-DD\\``.
-    - Tên bản Output: quyet_toan_output_YYYYMMDD_HHMMSS<ext> (không ghi đè).
-    - Giữ nguyên phần mở rộng gốc (ví dụ .json).
 
-    Trả về đường dẫn bản Output vừa tạo.
+def remove_file(path: str) -> bool:
+    """Xóa một file nếu còn tồn tại; trả về True nếu đã xóa được.
+
+    Dùng để dọn file JSON tạm (lô cũ đã nhập xong hoặc bị lô mới thay thế).
+    Không ném lỗi: xóa không được thì chỉ báo False cho caller ghi log.
     """
-    if not os.path.exists(download_path):
-        raise FileNotFoundError(download_path)
-
-    now = datetime.now()
-    date_dir = now.strftime("%Y-%m-%d")
-    timestamp = now.strftime("%Y%m%d_%H%M%S")
-    ext = os.path.splitext(download_path)[1].lower() or ".json"
-
-    output_day = os.path.join(output_folder, date_dir)
-    os.makedirs(output_day, exist_ok=True)
-    output_path = _unique_path(
-        os.path.join(output_day, f"quyet_toan_output_{timestamp}{ext}")
-    )
-
-    shutil.copy2(download_path, output_path)
-    return output_path
+    if not path or not os.path.exists(path):
+        return False
+    try:
+        os.remove(path)
+        return True
+    except OSError:
+        return False
 
 
 def find_latest_output_file(
@@ -247,19 +244,6 @@ def last_saved_text(path: str) -> str:
     except (OSError, TypeError):
         return ""
     return datetime.fromtimestamp(mtime).strftime("%H:%M ngày %d/%m/%Y")
-
-
-def _unique_path(path: str) -> str:
-    """Trả về đường dẫn không trùng bằng cách thêm hậu tố _1, _2, ... nếu cần."""
-    if not os.path.exists(path):
-        return path
-    base, ext = os.path.splitext(path)
-    i = 1
-    while True:
-        candidate = f"{base}_{i}{ext}"
-        if not os.path.exists(candidate):
-            return candidate
-        i += 1
 
 
 # ---------------------------------------------------------------------------

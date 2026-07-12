@@ -2,6 +2,12 @@
 
 Module này không phụ thuộc giao diện Qt. Giao diện chỉ gọi ``analyze`` để lấy
 kế hoạch, thu thập lựa chọn của người dùng rồi gọi ``commit`` để ghi an toàn.
+
+File JSON bóc tách được coi là bộ nhớ tạm: mỗi lần phân tích chỉ làm việc với
+đúng các dòng đang có trong file, không kéo dữ liệu chờ của các lần trước vào.
+Dòng nào không ghép được với dữ liệu quyết toán thì trả về trong
+``ImportAnalysis.unmatched_rows`` để người dùng sửa lại ở Bước 2 hoặc bỏ đi,
+chứ không ghi nửa vời vào file theo dõi.
 """
 
 from __future__ import annotations
@@ -75,27 +81,20 @@ DOC_SCALE = "PHIEU_CAN"
 DOC_BILL = "BILL"
 DOC_EXPENSE = "KHOAN_CHI"
 
-STATE_WAITING_BILL = "WAITING_BILL"
-STATE_WAITING_SCALE = "WAITING_SCALE"
-STATE_NEEDS_BILL = "NEEDS_BILL_SELECTION"
-STATE_MISSING = "MISSING_DATA"
-STATE_CONFLICT = "CONFLICT"
+DOC_LABELS = {
+    DOC_SCALE: "Phiếu cân",
+    DOC_BILL: "Bill",
+    DOC_EXPENSE: "Khoản chi",
+}
+
 STATE_READY = "READY"
 STATE_COMPLETED = "COMPLETED"
 STATE_IGNORED = "IGNORED"
 
-STATE_LABELS = {
-    STATE_WAITING_BILL: "Chờ Bill",
-    STATE_WAITING_SCALE: "Chờ Phiếu cân",
-    STATE_NEEDS_BILL: "Cần chọn Bill",
-    STATE_MISSING: "Thiếu dữ liệu",
-    STATE_CONFLICT: "Xung đột dữ liệu",
-    STATE_READY: "Sẵn sàng nhập",
-    STATE_COMPLETED: "Đã hoàn tất",
-    STATE_IGNORED: "Đã bỏ qua",
-    "PENDING": "Đang chờ xử lý",
-    "FAILED": "Xử lý lỗi",
-}
+# Lý do một dòng bóc tách không ghép được với dữ liệu quyết toán.
+REASON_NO_TARGET = "Không tìm thấy dòng quyết toán tương ứng"
+REASON_MANY_TARGETS = "Khớp nhiều dòng quyết toán, chưa rõ SQT nào"
+REASON_MANY_BILLS = "Container có nhiều Bill, chưa rõ Bill nào đúng"
 
 _ACCENTED_VIETNAMESE = re.compile(
     r"[ÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬÈÉẺẼẸÊỀẾỂỄỆÌÍỈĨỊ"
@@ -119,6 +118,7 @@ class DailyImportError(RuntimeError):
 @dataclass
 class ExtractedRow:
     staged_id: int = 0
+    json_index: int = -1
     source_row: int = 0
     row_key: str = ""
     source_name: str = ""
@@ -147,58 +147,32 @@ class ExtractedRow:
     other: str = ""
     confidence: str = ""
     warning: str = ""
-    preferred_sqt: Optional[int] = None
-    force_new_sqt: bool = False
     md5_is_synthetic: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any], staged_id: int = 0) -> "ExtractedRow":
-        allowed = cls.__dataclass_fields__.keys()
-        values = {key: data.get(key) for key in allowed if key in data}
-        values["staged_id"] = staged_id or int(values.get("staged_id") or 0)
-        return cls(**values)
-
 
 @dataclass
-class BillCandidate:
+class UnmatchedRow:
+    """Một dòng bóc tách không ghép được với dữ liệu quyết toán.
+
+    ``json_index`` là vị trí của dòng trong mảng ``du_lieu_boc_tach`` của file
+    JSON tạm, để Bước 2 tô sáng đúng dòng và để xóa đúng dòng khi người dùng
+    chọn bỏ các dòng lỗi.
+    """
+
+    json_index: int
     staged_id: int
-    md5: str
-    source_name: str
-    bill_no: str
+    doc_type: str
     container: str
-    seal: str
-    vessel: str
-    sail_date: Optional[str]
-    carrier: str
-
-
-@dataclass
-class TargetCandidate:
-    row_number: int
-    sqt: int
-    close_date: Optional[str]
-    container: str
-    cargo: str
-    vessel: str = ""
-
-
-@dataclass
-class BillChoiceRequest:
-    subject_key: str
-    container: str
-    close_date: Optional[str]
-    tons: Optional[float]
-    cargo: str
-    candidates: List[BillCandidate]
-    target_candidates: List[TargetCandidate] = field(default_factory=list)
-    allow_new_target: bool = True
+    match_date: Optional[str]
+    reference: str
+    reason: str
 
     @property
-    def target_subject_key(self) -> str:
-        return f"{self.subject_key}:target"
+    def doc_label(self) -> str:
+        return DOC_LABELS.get(self.doc_type, self.doc_type or "Chứng từ")
 
 
 @dataclass
@@ -241,7 +215,7 @@ class ImportAnalysis:
     duplicate_documents: int = 0
     info_changes: List[InfoChange] = field(default_factory=list)
     expense_changes: List[ExpenseChange] = field(default_factory=list)
-    bill_choices: List[BillChoiceRequest] = field(default_factory=list)
+    unmatched_rows: List[UnmatchedRow] = field(default_factory=list)
     conflicts: List[FieldConflict] = field(default_factory=list)
     pending_count: int = 0
     pending_states: Dict[int, Tuple[str, str]] = field(default_factory=dict)
@@ -254,6 +228,10 @@ class ImportAnalysis:
     @property
     def updated_info_count(self) -> int:
         return sum(change.action == "UPDATE" for change in self.info_changes)
+
+    @property
+    def has_changes(self) -> bool:
+        return bool(self.info_changes or self.expense_changes)
 
 
 @dataclass
@@ -390,7 +368,8 @@ def normalize_cargo(
     return original, False
 
 
-def _doc_type(value: Any) -> str:
+def classify_doc_type(value: Any) -> str:
+    """Nhận diện loại chứng từ từ trường ``loai_chung_tu`` của JSON."""
     key = _key_text(value)
     if "PHIEU CAN" in key:
         return DOC_SCALE
@@ -399,6 +378,133 @@ def _doc_type(value: Any) -> str:
     if "KHOAN CHI" in key or "CHI PHI" in key:
         return DOC_EXPENSE
     return ""
+
+
+def match_date_of(item: Dict[str, Any]) -> Optional[str]:
+    """Ngày dùng để ghép của một dòng JSON bóc tách (dạng ISO).
+
+    Phiếu cân ghép theo ngày đóng; Khoản chi và Bill ưu tiên ngày chạy rồi mới
+    tới ngày đóng. Bước 2 hiển thị đúng ngày này để người dùng biết phần mềm
+    đang dùng ngày nào khi ghép dữ liệu.
+    """
+    close_date = parse_date(item.get("ngay_dong"))
+    sail_date = parse_date(item.get("ngay_chay"))
+    if classify_doc_type(item.get("loai_chung_tu")) == DOC_SCALE:
+        return close_date
+    return sail_date or close_date
+
+
+# ---------------------------------------------------------------------------
+# File JSON tạm (bộ nhớ tạm của một lô bóc tách)
+# ---------------------------------------------------------------------------
+def load_extract_payload(path: str) -> Dict[str, Any]:
+    """Đọc file JSON bóc tách và kiểm tra cấu trúc tối thiểu."""
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            payload = json.load(f)
+    except json.JSONDecodeError as exc:
+        raise DailyImportError(f"File JSON bóc tách không hợp lệ: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        raise DailyImportError(
+            "File JSON bóc tách không đọc được bằng UTF-8. Vui lòng tải lại file."
+        ) from exc
+    except OSError as exc:
+        raise DailyImportError(f"Không đọc được file JSON bóc tách: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise DailyImportError("File JSON bóc tách phải có object gốc.")
+    rows = payload.get("du_lieu_boc_tach")
+    if not isinstance(rows, list):
+        raise DailyImportError("File JSON thiếu mảng 'du_lieu_boc_tach'.")
+    if any(not isinstance(row, dict) for row in rows):
+        raise DailyImportError("Mỗi dòng trong 'du_lieu_boc_tach' phải là object JSON.")
+    return payload
+
+
+def save_extract_payload(path: str, payload: Dict[str, Any]) -> None:
+    """Ghi lại file JSON tạm sau khi người dùng sửa/xóa dòng."""
+    refresh_extract_metadata(payload)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+    except OSError as exc:
+        raise DailyImportError(f"Không lưu được file JSON bóc tách: {exc}") from exc
+
+
+def refresh_extract_metadata(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Tính lại các con số thống kê trong ``metadata`` theo dữ liệu hiện có."""
+    rows = [row for row in payload.get("du_lieu_boc_tach") or [] if isinstance(row, dict)]
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        payload["metadata"] = metadata
+
+    counts = extract_summary(rows, payload.get("canh_bao"))
+    metadata["tong_so_file"] = counts["files"]
+    metadata["tong_so_dong_boc_tach"] = counts["total"]
+    metadata["so_dong_ok"] = counts["ok"]
+    metadata["so_dong_can_kiem_tra"] = counts["need_check"]
+    metadata["tong_so_canh_bao"] = counts["warnings"]
+    return metadata
+
+
+def extract_summary(
+    rows: Sequence[Dict[str, Any]],
+    global_warnings: Any = None,
+    error_indexes: Optional[Iterable[int]] = None,
+) -> Dict[str, int]:
+    """Thống kê nhanh một lô bóc tách để hiển thị ở đầu màn hình Bước 2.
+
+    ``error_indexes`` là các dòng Bước 3 không nhập được; chúng luôn được tính
+    vào nhóm “cần kiểm tra” dù trạng thái trong JSON vẫn là OK.
+    """
+    errors = set(error_indexes or ())
+    warnings = len(global_warnings) if isinstance(global_warnings, list) else 0
+    counts = {
+        "files": len(
+            {str(row.get("file_nguon") or "") for row in rows if row.get("file_nguon")}
+        ),
+        "total": len(rows),
+        "ok": 0,
+        "need_check": 0,
+        "warnings": warnings,
+        DOC_SCALE: 0,
+        DOC_BILL: 0,
+        DOC_EXPENSE: 0,
+        "other": 0,
+    }
+    for index, row in enumerate(rows):
+        counts[classify_doc_type(row.get("loai_chung_tu")) or "other"] += 1
+        row_warnings = row.get("canh_bao")
+        if isinstance(row_warnings, list):
+            counts["warnings"] += len(row_warnings)
+        elif row_warnings not in (None, ""):
+            counts["warnings"] += 1
+        if index not in errors and _key_text(row.get("trang_thai")) in ("", "OK"):
+            counts["ok"] += 1
+        else:
+            counts["need_check"] += 1
+    return counts
+
+
+def remove_extract_rows(path: str, indexes: Iterable[int]) -> int:
+    """Xóa các dòng theo vị trí khỏi ``du_lieu_boc_tach`` của file JSON tạm.
+
+    Dùng khi người dùng chọn “Hủy các dòng lỗi và nhập các dòng còn lại”: các
+    dòng lỗi biến mất hẳn khỏi bộ nhớ tạm thay vì nằm lại hàng chờ.
+    Trả về số dòng đã xóa.
+    """
+    payload = load_extract_payload(path)
+    rows = payload.get("du_lieu_boc_tach") or []
+    drop = {index for index in indexes if 0 <= index < len(rows)}
+    if not drop:
+        return 0
+    payload["du_lieu_boc_tach"] = [
+        row for index, row in enumerate(rows) if index not in drop
+    ]
+    save_extract_payload(path, payload)
+    return len(drop)
 
 
 def _join_md5(*values: Any) -> str:
@@ -425,13 +531,6 @@ def _normalize_import_status(value: Any, default: str = "Chưa nhập") -> str:
     if key == "CHUA NHAP":
         return "Chưa nhập"
     return default
-
-
-def _parse_target_decision(value: Any) -> Optional[int]:
-    text = str(value or "").strip()
-    if text.startswith("sqt:"):
-        text = text[4:]
-    return int(text) if text.isdigit() else None
 
 
 def _stable_row_key(row: ExtractedRow, occurrence: int = 0) -> str:
@@ -472,10 +571,9 @@ class DailyImportService:
         output_path: str,
         daily_path: str,
         processed_file_id: Optional[int] = None,
-        bill_decisions: Optional[Dict[str, str]] = None,
     ) -> ImportAnalysis:
         if not os.path.isfile(output_path):
-            raise DailyImportError("Không tìm thấy bản Output đã kiểm tra.")
+            raise DailyImportError("Không tìm thấy file JSON bóc tách đang dùng.")
         if not os.path.isfile(daily_path):
             raise DailyImportError(
                 "Không tìm thấy file theo dõi hàng ngày. Vui lòng kiểm tra Cài đặt."
@@ -494,9 +592,9 @@ class DailyImportService:
             extracted_rows=len(parsed),
         )
 
-        statuses = self.database.get_document_statuses(
-            sorted({row.md5 for row in parsed if row.md5})
-        )
+        # JSON tạm là nguồn dữ liệu duy nhất của lần nhập này: dọn hàng chờ cũ
+        # rồi chỉ ghi nhận đúng các dòng đang có trong file.
+        self.database.clear_pending_staged_rows()
         occurrences: Dict[Tuple[str, str], int] = {}
         for row in parsed:
             if not row.md5:
@@ -519,34 +617,32 @@ class DailyImportService:
                 row.to_dict(),
             )
 
-        duplicate_md5 = {
-            row.md5
-            for row in parsed
-            if row.md5
-            and not row.md5_is_synthetic
-            and (
-                statuses.get(row.md5) in ("COMPLETED", "IGNORED")
-                or (row.md5 in snapshot.target_md5 and row.md5 not in statuses)
-            )
+        # Một dòng chỉ được coi là "đã nhập" khi CẢ HAI cùng đồng ý:
+        #   - database: đúng dòng đó đã được ghi xong (một file chứng từ có thể sinh
+        #     nhiều dòng, ví dụ một ảnh khoản chi có 4 container);
+        #   - file theo dõi: MD5 của chứng từ vẫn còn trong cột MD5.
+        # Nhờ vế thứ hai, người dùng xóa dòng khỏi Excel là nhập lại được ngay mà
+        # không phải đụng vào database.
+        never_written = {
+            int(item["id"])
+            for item in self.database.list_staged_rows(include_completed=False)
         }
+        active: List[ExtractedRow] = []
+        duplicate_md5: set[str] = set()
+        for row in parsed:
+            if not row.staged_id:
+                continue
+            written_before = row.staged_id not in never_written
+            # Chứng từ không có MD5 thì không soi được trong file theo dõi; đành chỉ
+            # dựa vào bộ nhớ của app để khỏi ghi trùng.
+            still_in_daily = row.md5_is_synthetic or row.md5 in snapshot.target_md5
+            if written_before and still_in_daily:
+                if not row.md5_is_synthetic:
+                    duplicate_md5.add(row.md5)
+                continue
+            active.append(row)
         analysis.duplicate_documents = len(duplicate_md5)
 
-        active_records = self.database.list_staged_rows(include_completed=False)
-        active = [
-            ExtractedRow.from_dict(item.get("data") or {}, int(item["id"]))
-            for item in active_records
-        ]
-        for row, item in zip(active, active_records):
-            row.row_key = item.get("row_key") or row.row_key
-            row.md5 = item.get("document_md5") or row.md5
-            row.preferred_sqt = (
-                int(item.get("matched_sqt"))
-                if item.get("matched_sqt") is not None
-                else row.preferred_sqt
-            )
-
-        saved_decisions = self.database.get_match_decisions()
-        decisions = {**saved_decisions, **(bill_decisions or {})}
         bills_by_container: Dict[str, List[ExtractedRow]] = {}
         scales: List[ExtractedRow] = []
         expenses: List[ExtractedRow] = []
@@ -561,73 +657,31 @@ class DailyImportService:
         next_sqt = snapshot.max_sqt + 1
         used_bills: set[int] = set()
         resolved_bill_containers: set[str] = set()
-        choice_pending_containers: set[str] = set()
+        blocked_containers: set[str] = set()
         virtual_rows = list(snapshot.info_rows)
 
         for scale in scales:
-            subject_key = f"scale:{scale.row_key}"
-            candidates = self._distinct_bills(
-                row
-                for row in bills_by_container.get(scale.container, [])
-            )
-            target_options = self._scale_target_options(virtual_rows, scale)
-            target, target_waiting = self._resolve_target_choice(
-                subject_key,
-                scale,
-                target_options,
-                decisions,
-                analysis,
-                bill_candidates=candidates,
-                allow_new=True,
-            )
-            if target_waiting:
-                choice_pending_containers.add(scale.container)
+            raw_bills = bills_by_container.get(scale.container, [])
+            candidates = self._distinct_bills(raw_bills)
+            if len(candidates) > 1:
+                # Không tự đoán Bill nào đúng: người dùng sửa lại ở Bước 2. Báo cả
+                # Phiếu cân lẫn mọi dòng Bill của container để bỏ là bỏ hết.
+                self._mark_unmatched(analysis, scale, REASON_MANY_BILLS)
+                for bill in raw_bills:
+                    self._mark_unmatched(analysis, bill, REASON_MANY_BILLS)
+                blocked_containers.add(scale.container)
                 continue
 
-            selected_bill: Optional[ExtractedRow] = None
-            if len(candidates) == 1:
-                selected_bill = candidates[0]
-            elif len(candidates) > 1:
-                selected_md5 = decisions.get(subject_key)
-                if selected_md5 == "__SKIP__":
-                    analysis.pending_states[scale.staged_id] = (
-                        STATE_NEEDS_BILL,
-                        "Người dùng chọn để xử lý sau.",
-                    )
-                    continue
-                if selected_md5 == "__IGNORE__":
-                    analysis.pending_states[scale.staged_id] = (
-                        STATE_IGNORED,
-                        "Người dùng bỏ qua container này.",
-                    )
-                    continue
-                selected_bill = next(
-                    (item for item in candidates if item.md5 == selected_md5), None
-                )
-                if selected_bill is None:
-                    analysis.bill_choices.append(
-                        self._bill_choice(
-                            subject_key,
-                            scale,
-                            candidates,
-                            target_options,
-                        )
-                    )
-                    choice_pending_containers.add(scale.container)
-                    analysis.pending_states[scale.staged_id] = (
-                        STATE_NEEDS_BILL,
-                        "Cần chọn Bill hoặc dòng SQT phù hợp.",
-                    )
-                    for bill in candidates:
-                        analysis.pending_states[bill.staged_id] = (
-                            STATE_NEEDS_BILL,
-                            "Chờ người dùng chọn Bill phù hợp.",
-                        )
-                    continue
+            # Container khớp nhiều dòng quyết toán: Bill của container cũng sẽ khớp
+            # nhiều dòng như vậy nên cứ để vòng Bill bên dưới báo lỗi cho nó.
+            target_options = self._scale_target_options(virtual_rows, scale)
+            if len(target_options) > 1:
+                self._mark_unmatched(analysis, scale, REASON_MANY_TARGETS)
+                continue
 
-            fallback = target.values if target else (
-                target_options[0].values if len(target_options) == 1 else {}
-            )
+            selected_bill = candidates[0] if candidates else None
+            target = target_options[0] if target_options else None
+            fallback = target.values if target else {}
             sqt = target.sqt if target else next_sqt
             action = "UPDATE" if target else "CREATE"
             if not target:
@@ -640,7 +694,6 @@ class DailyImportService:
             check_status = (
                 "Cần kiểm tra"
                 if previous_same_container
-                or scale.force_new_sqt
                 or not scale.cargo_recognized
                 # Tạo QT mới mà không có Bill (thông tin tàu nhập tay) -> đánh dấu
                 # để người dùng soát lại cho an toàn.
@@ -648,13 +701,7 @@ class DailyImportService:
                 or self._source_needs_review(scale, selected_bill)
                 else "OK"
             )
-            values = self._info_values(
-                scale,
-                selected_bill,
-                sqt,
-                fallback,
-                check_status,
-            )
+            values = self._info_values(scale, selected_bill, sqt, fallback)
             conflicts = self._find_conflicts(target, values) if target else []
             if conflicts:
                 check_status = "Cần kiểm tra"
@@ -695,114 +742,32 @@ class DailyImportService:
 
         # Bill có thể bổ sung trực tiếp cho một dòng quyết toán đã tồn tại.
         for container, raw_candidates in bills_by_container.items():
-            if container in choice_pending_containers:
+            if container in blocked_containers:
                 continue
             remaining = [
-                row
-                for row in raw_candidates
-                if row.staged_id not in used_bills
+                row for row in raw_candidates if row.staged_id not in used_bills
             ]
             if not remaining:
                 continue
             if container in resolved_bill_containers:
+                # Cùng một Bill (trùng MD5) đã ghép với Phiếu cân ở trên.
                 for bill in remaining:
-                    analysis.pending_states[bill.staged_id] = (
-                        STATE_NEEDS_BILL,
-                        "Bill khác chưa được chọn cho Container này.",
-                    )
-                continue
-            target_rows = [row for row in virtual_rows if row.container == container]
-            preferred_sqt = next(
-                (row.preferred_sqt for row in remaining if row.preferred_sqt), None
-            )
-            if preferred_sqt:
-                target_rows = [row for row in target_rows if row.sqt == preferred_sqt]
-            candidates = self._distinct_bills(remaining)
-            subject_key = f"target:{container}:{preferred_sqt or 'auto'}"
-            target_dates = {row.close_date for row in target_rows if row.close_date}
-            container_decision = None
-            if len(target_dates) == 1:
-                container_decision = decisions.get(
-                    f"container:{container}:{next(iter(target_dates))}"
-                )
-            if (
-                container_decision
-                and container_decision not in ("__NEW__", "__SKIP__", "__IGNORE__")
-                and not str(container_decision).startswith("sqt:")
-                and all(
-                    item.md5 != container_decision for item in candidates
-                )
-            ):
-                for bill in remaining:
-                    analysis.pending_states[bill.staged_id] = (
-                        STATE_WAITING_SCALE,
-                        "Bill này không được chọn cho dòng hiện có; chờ Phiếu cân khác.",
-                    )
-                continue
-            selected_bill = next(
-                (item for item in candidates if item.md5 == container_decision),
-                candidates[0] if len(candidates) == 1 else None,
-            )
-            if len(candidates) > 1:
-                selected_md5 = decisions.get(subject_key)
-                if selected_md5 == "__SKIP__":
-                    for bill in remaining:
-                        analysis.pending_states[bill.staged_id] = (
-                            STATE_NEEDS_BILL,
-                            "Người dùng chọn để xử lý sau.",
-                        )
-                    continue
-                if selected_md5 == "__IGNORE__":
-                    for bill in remaining:
-                        analysis.pending_states[bill.staged_id] = (
-                            STATE_IGNORED,
-                            "Người dùng bỏ qua container này.",
-                        )
-                    continue
-                selected_bill = next(
-                    (item for item in candidates if item.md5 == selected_md5), None
-                )
-                if selected_bill is None:
-                    seed_close_date = target_rows[0].close_date if target_rows else None
-                    seed_tons = (
-                        parse_number(target_rows[0].values.get("Số tấn"))
-                        if target_rows
-                        else None
-                    )
-                    seed_cargo = (
-                        str(target_rows[0].values.get("Loại hàng") or "")
-                        if target_rows
-                        else ""
-                    )
-                    seed = ExtractedRow(
-                        container=container,
-                        close_date=seed_close_date,
-                        tons=seed_tons,
-                        cargo=seed_cargo,
-                    )
-                    analysis.bill_choices.append(
-                        self._bill_choice(subject_key, seed, candidates, target_rows)
-                    )
-                    for bill in remaining:
-                        analysis.pending_states[bill.staged_id] = (
-                            STATE_NEEDS_BILL,
-                            "Chờ người dùng chọn Bill phù hợp.",
-                        )
-                    continue
-            if selected_bill is None:
+                    analysis.pending_states[bill.staged_id] = (STATE_READY, "")
+                    analysis.completed_staged_ids.append(bill.staged_id)
                 continue
 
-            target, target_waiting = self._resolve_target_choice(
-                subject_key,
-                selected_bill,
-                target_rows,
-                decisions,
-                analysis,
-                bill_candidates=candidates,
-                allow_new=True,
-            )
-            if target_waiting:
+            candidates = self._distinct_bills(remaining)
+            if len(candidates) > 1:
+                for bill in remaining:
+                    self._mark_unmatched(analysis, bill, REASON_MANY_BILLS)
                 continue
+            selected_bill = candidates[0]
+
+            target_rows = [row for row in virtual_rows if row.container == container]
+            if len(target_rows) > 1:
+                self._mark_unmatched(analysis, selected_bill, REASON_MANY_TARGETS)
+                continue
+            target = target_rows[0] if target_rows else None
             action = "UPDATE" if target else "CREATE"
             sqt = target.sqt if target else next_sqt
             if not target:
@@ -837,28 +802,23 @@ class DailyImportService:
             used_bills.add(selected_bill.staged_id)
             analysis.pending_states[selected_bill.staged_id] = (STATE_READY, "")
             analysis.completed_staged_ids.append(selected_bill.staged_id)
-            for bill in remaining:
-                if bill.staged_id != selected_bill.staged_id:
-                    analysis.pending_states[bill.staged_id] = (
-                        STATE_NEEDS_BILL,
-                        "Bill không được chọn cho dòng quyết toán này.",
-                    )
 
         self._analyze_expenses(expenses, virtual_rows, snapshot, analysis)
 
-        for item in active_records:
-            row_id = int(item["id"])
-            state, note = analysis.pending_states.get(
-                row_id, (item.get("state") or "PENDING", item.get("note") or "")
-            )
+        for row_id, (state, note) in analysis.pending_states.items():
             self.database.update_staged_row(row_id, state=state, note=note)
-        for md5 in {item.get("document_md5") or "" for item in active_records}:
-            if md5:
-                self.database.refresh_document_status(md5)
-        analysis.pending_count = sum(
-            item.get("state") not in (STATE_READY, STATE_COMPLETED, STATE_IGNORED)
-            for item in self.database.list_staged_rows(include_completed=False)
-        )
+        # Dòng không ghép được không nằm lại hàng chờ: người dùng sẽ sửa ở Bước 2
+        # hoặc bỏ hẳn ngay trong lần nhập này.
+        stale = [
+            row.staged_id
+            for row in active
+            if row.staged_id not in analysis.pending_states
+        ]
+        if stale:
+            self.database.delete_staged_rows(stale)
+        for md5 in {row.md5 for row in parsed if row.md5}:
+            self.database.refresh_document_status(md5)
+        analysis.pending_count = len(analysis.unmatched_rows)
         return analysis
 
     # ------------------------------------------------------------------ #
@@ -1004,34 +964,15 @@ class DailyImportService:
         if Path(path).suffix.lower() != ".json":
             raise DailyImportError("File bóc tách phải là định dạng JSON (.json).")
 
-        try:
-            with open(path, "r", encoding="utf-8-sig") as f:
-                payload = json.load(f)
-        except json.JSONDecodeError as exc:
-            raise DailyImportError(f"File JSON bóc tách không hợp lệ: {exc}") from exc
-        except UnicodeDecodeError as exc:
-            raise DailyImportError(
-                "File JSON bóc tách không đọc được bằng UTF-8. Vui lòng xuất/tải lại file."
-            ) from exc
-        except OSError as exc:
-            raise DailyImportError(f"Không đọc được file JSON bóc tách: {exc}") from exc
-
-        if not isinstance(payload, dict):
-            raise DailyImportError("File JSON bóc tách phải có object gốc.")
-        rows = payload.get("du_lieu_boc_tach")
-        if not isinstance(rows, list):
-            raise DailyImportError("File JSON thiếu mảng 'du_lieu_boc_tach'.")
+        payload = load_extract_payload(path)
+        rows = payload.get("du_lieu_boc_tach") or []
 
         result: List[ExtractedRow] = []
         for index, item in enumerate(rows, start=1):
-            if not isinstance(item, dict):
-                raise DailyImportError(
-                    f"Dòng du_lieu_boc_tach #{index} phải là object JSON."
-                )
             if not any(value not in (None, "", [], {}) for value in item.values()):
                 continue
 
-            doc_type = _doc_type(item.get("loai_chung_tu"))
+            doc_type = classify_doc_type(item.get("loai_chung_tu"))
             if not doc_type:
                 continue
 
@@ -1043,6 +984,7 @@ class DailyImportService:
             sail_date = parse_date(item.get("ngay_chay"))
             source_row_number = parse_number(item.get("stt_hien_thi"))
             row = ExtractedRow(
+                json_index=index - 1,
                 source_row=int(source_row_number or index),
                 source_name=str(item.get("file_nguon") or ""),
                 md5=normalize_md5(item.get("ma_md5_file")),
@@ -1184,67 +1126,14 @@ class DailyImportService:
     def _scale_target_options(
         self, rows: Sequence[_TargetInfoRow], scale: ExtractedRow
     ) -> List[_TargetInfoRow]:
-        if scale.force_new_sqt:
-            return []
-        if scale.preferred_sqt:
-            preferred = [
-                row
-                for row in rows
-                if row.sqt == scale.preferred_sqt
-                and (not scale.container or row.container == scale.container)
-            ]
-            if preferred:
-                return preferred
         group = self._target_group(rows, scale.close_date, scale.container)
         if not group:
             return []
         if scale.cargo and any(row.cargo for row in group):
-            exact = [
+            return [
                 row for row in group if _key_text(row.cargo) == _key_text(scale.cargo)
             ]
-            return exact
         return group
-
-    def _resolve_target_choice(
-        self,
-        subject_key: str,
-        subject: ExtractedRow,
-        candidates: Sequence[_TargetInfoRow],
-        decisions: Dict[str, str],
-        analysis: ImportAnalysis,
-        *,
-        bill_candidates: Sequence[ExtractedRow] = (),
-        allow_new: bool = True,
-    ) -> Tuple[Optional[_TargetInfoRow], bool]:
-        if not candidates:
-            return None, False
-        if len(candidates) == 1:
-            return candidates[0], False
-
-        target_key = f"{subject_key}:target"
-        selected = decisions.get(target_key)
-        if selected == "__SKIP__":
-            analysis.pending_states[subject.staged_id] = (
-                STATE_NEEDS_BILL,
-                "Người dùng chọn để xử lý sau.",
-            )
-            return None, True
-        if selected == "__NEW__" and allow_new:
-            return None, False
-        selected_sqt = _parse_target_decision(selected)
-        if selected_sqt is not None:
-            target = next((row for row in candidates if row.sqt == selected_sqt), None)
-            if target:
-                return target, False
-
-        analysis.bill_choices.append(
-            self._bill_choice(subject_key, subject, bill_candidates, candidates, allow_new)
-        )
-        analysis.pending_states[subject.staged_id] = (
-            STATE_NEEDS_BILL,
-            "Container khớp nhiều dòng quyết toán; cần chọn SQT.",
-        )
-        return None, True
 
     @staticmethod
     def _distinct_bills(rows: Iterable[ExtractedRow]) -> List[ExtractedRow]:
@@ -1256,46 +1145,37 @@ class DailyImportService:
                 result.append(row)
         return result
 
-    def _bill_choice(
-        self,
-        subject_key: str,
-        subject: ExtractedRow,
-        candidates: Sequence[ExtractedRow],
-        target_candidates: Sequence[_TargetInfoRow] = (),
-        allow_new_target: bool = True,
-    ) -> BillChoiceRequest:
-        return BillChoiceRequest(
-            subject_key=subject_key,
-            container=subject.container,
-            close_date=subject.close_date,
-            tons=subject.tons,
-            cargo=subject.cargo,
-            candidates=[
-                BillCandidate(
-                    staged_id=row.staged_id,
-                    md5=row.md5,
-                    source_name=row.source_name,
-                    bill_no=row.bill_no,
-                    container=row.container,
-                    seal=row.seal,
-                    vessel=row.vessel,
-                    sail_date=row.sail_date,
-                    carrier=row.carrier,
-                )
-                for row in candidates
-            ],
-            target_candidates=[
-                TargetCandidate(
-                    row_number=row.row_number,
-                    sqt=row.sqt,
-                    close_date=row.close_date,
-                    container=row.container,
-                    cargo=row.cargo,
-                    vessel=str(row.values.get("Tên tàu") or ""),
-                )
-                for row in target_candidates
-            ],
-            allow_new_target=allow_new_target,
+    @staticmethod
+    def _match_date(row: ExtractedRow) -> Optional[str]:
+        """Ngày dùng để ghép của một dòng đã bóc tách (Bill ưu tiên ngày chạy)."""
+        if row.doc_type == DOC_BILL:
+            return row.sail_date or row.close_date
+        return row.close_date
+
+    @staticmethod
+    def _reference_text(row: ExtractedRow) -> str:
+        """Số HĐ/Bill/Seal để người dùng nhận ra dòng lỗi trong file gốc."""
+        if row.doc_type == DOC_EXPENSE and row.invoice_no:
+            return f"HĐ {row.invoice_no}"
+        if row.doc_type == DOC_BILL and row.bill_no:
+            return f"Bill {row.bill_no}"
+        if row.doc_type == DOC_SCALE and row.seal:
+            return f"Seal {row.seal}"
+        return row.invoice_no or row.bill_no or row.seal or ""
+
+    def _mark_unmatched(
+        self, analysis: ImportAnalysis, row: ExtractedRow, reason: str
+    ) -> None:
+        analysis.unmatched_rows.append(
+            UnmatchedRow(
+                json_index=row.json_index,
+                staged_id=row.staged_id,
+                doc_type=row.doc_type,
+                container=row.container,
+                match_date=self._match_date(row),
+                reference=self._reference_text(row),
+                reason=reason,
+            )
         )
 
     @staticmethod
@@ -1317,7 +1197,6 @@ class DailyImportService:
         bill: Optional[ExtractedRow],
         sqt: int,
         fallback: Dict[str, Any],
-        check_status: str,
     ) -> Dict[str, Any]:
         vessel = (
             (bill.vessel if bill else "")
@@ -1427,26 +1306,20 @@ class DailyImportService:
                 if row.close_date == expense.close_date
                 and row.container == expense.container
             ]
-            manual_match = False
-            if expense.preferred_sqt:
-                preferred = [row for row in matches if row.sqt == expense.preferred_sqt]
-                if not preferred:
-                    preferred = [
-                        row
-                        for row in virtual_rows
-                        if row.sqt == expense.preferred_sqt
-                        and row.container == expense.container
-                    ]
-                    manual_match = bool(preferred)
-                if preferred:
-                    matches = preferred
             sqt_values = {row.sqt for row in matches if row.sqt}
-            sqt = next(iter(sqt_values)) if len(sqt_values) == 1 else None
+            if len(sqt_values) != 1:
+                # Khoản chi không có đúng một SQT thì không ghi vào sheet Khoan_Chi:
+                # ghi với SQT rỗng sẽ tạo dòng mồ côi không đối chiếu được.
+                self._mark_unmatched(
+                    analysis,
+                    expense,
+                    REASON_NO_TARGET if not sqt_values else REASON_MANY_TARGETS,
+                )
+                continue
+            sqt = next(iter(sqt_values))
             check_status = (
                 "Cần kiểm tra" if self._source_needs_review(expense) else "OK"
             )
-            if manual_match:
-                check_status = "Cần kiểm tra"
             if (
                 expense.total is not None
                 and expense.amount is not None

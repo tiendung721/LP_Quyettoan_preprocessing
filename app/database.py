@@ -61,14 +61,6 @@ CREATE TABLE IF NOT EXISTS staged_rows (
     FOREIGN KEY(document_md5) REFERENCES source_documents(md5)
 );
 
-CREATE TABLE IF NOT EXISTS match_decisions (
-    subject_key TEXT PRIMARY KEY,
-    container_norm TEXT,
-    bill_md5 TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS daily_import_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     processed_file_id INTEGER,
@@ -265,18 +257,6 @@ class Database:
             )
             conn.commit()
 
-    def get_document_statuses(self, md5_values: List[str]) -> Dict[str, str]:
-        values = [value for value in md5_values if value]
-        if not values:
-            return {}
-        placeholders = ",".join("?" for _ in values)
-        with self._connect() as conn:
-            rows = conn.execute(
-                f"SELECT md5, status FROM source_documents WHERE md5 IN ({placeholders})",
-                values,
-            ).fetchall()
-            return {row["md5"]: row["status"] for row in rows}
-
     def upsert_staged_row(
         self,
         document_md5: str,
@@ -423,31 +403,32 @@ class Database:
             ).fetchone()
             return int(row["count"])
 
-    def save_match_decision(
-        self, subject_key: str, container_norm: str, bill_md5: str
-    ) -> None:
-        now = _now()
+    def delete_staged_rows(self, row_ids: List[int]) -> int:
+        """Xóa hẳn một số dòng tạm (dòng không ghép được, dòng bị người dùng bỏ)."""
+        values = [int(row_id) for row_id in row_ids if row_id]
+        if not values:
+            return 0
+        placeholders = ",".join("?" for _ in values)
         with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO match_decisions (
-                    subject_key, container_norm, bill_md5, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(subject_key) DO UPDATE SET
-                    container_norm = excluded.container_norm,
-                    bill_md5 = excluded.bill_md5,
-                    updated_at = excluded.updated_at
-                """,
-                (subject_key, container_norm, bill_md5, now, now),
+            cur = conn.execute(
+                f"DELETE FROM staged_rows WHERE id IN ({placeholders})", values
             )
             conn.commit()
+            return int(cur.rowcount or 0)
 
-    def get_match_decisions(self) -> Dict[str, str]:
+    def clear_pending_staged_rows(self) -> int:
+        """Dọn toàn bộ dòng tạm chưa hoàn tất.
+
+        File JSON bóc tách là bộ nhớ tạm nên mỗi lần phân tích lại phải dựng lại
+        hàng chờ từ đúng file đang dùng. Các dòng đã COMPLETED/IGNORED được giữ
+        lại để còn nhận ra chứng từ đã nhập trước đó.
+        """
         with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT subject_key, bill_md5 FROM match_decisions"
-            ).fetchall()
-            return {row["subject_key"]: row["bill_md5"] for row in rows}
+            cur = conn.execute(
+                "DELETE FROM staged_rows WHERE state NOT IN ('COMPLETED', 'IGNORED')"
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
 
     def refresh_document_status(self, md5: str) -> str:
         with self._connect() as conn:

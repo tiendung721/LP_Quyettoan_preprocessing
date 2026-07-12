@@ -47,14 +47,13 @@ from PySide6.QtWidgets import (
 
 from . import file_utils
 from .config import AppConfig
-from .daily_import import ImportAnalysis, ImportSummary
-from .daily_import import DailyImportService
+from .daily_import import DailyImportError, ImportAnalysis, ImportSummary
+from .daily_import import DailyImportService, remove_extract_rows
 from .daily_import_ui import (
-    BillSelectionDialog,
     ConflictDialog,
     FunctionWorker,
     JsonExtractDialog,
-    PendingDataDialog,
+    UnmatchedRowsDialog,
 )
 from .database import Database
 from .watcher import DownloadWatcher
@@ -496,9 +495,10 @@ class MainWindow(QMainWindow):
             "2", "Xem file bóc tách dữ liệu"
         )
         guide2.addWidget(self._guide_label(
-            "Khi trợ lý tải file JSON về, phần mềm tự mở màn hình kiểm tra dữ liệu. "
-            "Bấm nút này để mở lại bất cứ lúc nào. Sửa xong hãy bấm “Lưu”; dòng "
-            "“Lưu lần cuối” sẽ tự cập nhật."
+            "Khi trợ lý tải file JSON về, phần mềm tự mở bảng tổng quan cả lô bóc "
+            "tách. Chọn một dòng rồi bấm “Sửa dòng” hoặc “Xóa dòng”; bấm “Lưu” là "
+            "màn hình tự đóng và dòng “Lưu thành công lần cuối” bên dưới cập nhật "
+            "theo. Dòng nào Bước 3 chưa nhập được sẽ được tô đỏ kèm lý do."
         ))
         self.lbl_file_name = QLabel("Chưa có file bóc tách")
         self.lbl_file_name.setObjectName("fileName")
@@ -510,7 +510,7 @@ class MainWindow(QMainWindow):
         body2.addWidget(self.lbl_file_name)
         body2.addWidget(self.lbl_file_note)
 
-        self.lbl_file_saved = QLabel("Lưu lần cuối: —")
+        self.lbl_file_saved = QLabel("Lưu thành công lần cuối: —")
         self.lbl_file_saved.setObjectName("metaText")
         self.btn_view_extract = self._make_button(
             "Xem file bóc tách",
@@ -526,9 +526,10 @@ class MainWindow(QMainWindow):
             "3", "Nhập lên file hàng ngày"
         )
         guide3.addWidget(self._guide_label(
-            "Phần mềm lấy đúng bản JSON đã lưu mới nhất, ghép Phiếu cân, Bill và "
-            "khoản chi rồi cập nhật file theo dõi hàng ngày. Dữ liệu chưa đủ điều "
-            "kiện sẽ được hiện ra ngay sau khi nhập để bạn bổ sung."
+            "Phần mềm đọc thẳng file JSON bạn vừa xem ở Bước 2, ghép Phiếu cân, Bill "
+            "và khoản chi rồi cập nhật file theo dõi hàng ngày. Dòng nào không ghép "
+            "được sẽ không nhập: bạn chọn quay lại Bước 2 để sửa, hoặc bỏ các dòng "
+            "đó và vẫn nhập phần còn lại."
         ))
         self.lbl_daily_status = QLabel("Chưa nhập dữ liệu vào file theo dõi.")
         self.lbl_daily_status.setObjectName("hintText")
@@ -543,22 +544,13 @@ class MainWindow(QMainWindow):
         self.lbl_daily_path = QLabel("")
         self.lbl_daily_path.setObjectName("metaText")
         self.lbl_daily_path.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.lbl_daily_pending = QLabel("Dữ liệu đang chờ xử lý: 0")
-        self.lbl_daily_pending.setObjectName("metaText")
         self.btn_import_daily = self._make_button(
             "Nhập lên file hàng ngày",
             self.on_import_daily,
             variant="primary",
             action=True,
         )
-        body3.addLayout(
-            self._action_row(
-                self.btn_import_daily,
-                self.lbl_daily_path,
-                self._meta_dot(),
-                self.lbl_daily_pending,
-            )
-        )
+        body3.addLayout(self._action_row(self.btn_import_daily, self.lbl_daily_path))
         v.addWidget(self.card_step3)
 
         # --- Bước 4: nhập lên phần mềm quyết toán bằng RPA ---
@@ -588,13 +580,6 @@ class MainWindow(QMainWindow):
 
         v.addStretch(1)
         return scroll
-
-    @staticmethod
-    def _meta_dot() -> QLabel:
-        """Dấu chấm ngăn cách giữa hai thông tin phụ trên cùng một hàng."""
-        dot = QLabel("•")
-        dot.setObjectName("metaText")
-        return dot
 
     # ---- Trang "Cài đặt" -------------------------------------------- #
     def _build_settings_page(self) -> QScrollArea:
@@ -861,11 +846,6 @@ class MainWindow(QMainWindow):
         else:
             self.lbl_daily_path.setText("Ghi vào: (chưa cấu hình file theo dõi)")
             self.lbl_daily_path.setToolTip("")
-        try:
-            pending = self.database.count_pending_rows()
-        except Exception:  # noqa: BLE001 - nhãn không được làm sập UI
-            pending = 0
-        self.lbl_daily_pending.setText(f"Dữ liệu đang chờ xử lý: {pending}")
 
         rpa_bat = self.config.pad_bat_path
         if rpa_bat and os.path.isfile(rpa_bat):
@@ -876,13 +856,13 @@ class MainWindow(QMainWindow):
             self.lbl_rpa_path.setToolTip("")
 
     def _refresh_saved_label(self) -> None:
-        """Đồng bộ dòng “Lưu lần cuối” với thời điểm lưu thật của file."""
+        """Đồng bộ dòng “Lưu thành công lần cuối” với thời điểm lưu thật của file."""
         path = (self.current_working_file or {}).get("working_path") or ""
         text = file_utils.last_saved_text(path) if path else ""
         if text == self._last_saved_shown:
             return
         self._last_saved_shown = text
-        self.lbl_file_saved.setText("Lưu lần cuối: " + (text or "—"))
+        self.lbl_file_saved.setText("Lưu thành công lần cuối: " + (text or "—"))
         self._update_button_states()
 
     def _set_daily_running(self, running: bool, message: str = "") -> None:
@@ -1110,9 +1090,11 @@ class MainWindow(QMainWindow):
     def on_output_ready(self, result: Dict[str, Any]) -> None:
         """Nhận tín hiệu từ watcher khi có file bóc tách mới.
 
-        File JSON tải về giữ nguyên trong Downloads; người dùng kiểm tra và lưu
-        trực tiếp bằng JSON editor của phần mềm.
+        File JSON tải về là bộ nhớ tạm của lô đang làm: nó giữ nguyên trong
+        Downloads để người dùng kiểm tra ở Bước 2 và Bước 3 đọc trực tiếp. Lô
+        mới thay thế lô cũ nên bản JSON tạm trước đó được dọn đi.
         """
+        self._discard_temp_json(keep_path=result.get("working_path"))
         self.current_working_file = result
         self._update_current_file_labels(
             note="Trợ lý đã bóc tách dữ liệu xong. Đang mở màn hình kiểm tra JSON..."
@@ -1124,6 +1106,22 @@ class MainWindow(QMainWindow):
         self.refresh_history()
         self.append_log(f"File mới sẵn sàng: {result.get('file_name')}")
         self._open_extract_editor(auto=True)
+
+    def _discard_temp_json(self, keep_path: Optional[str] = None) -> None:
+        """Xóa file JSON tạm đang giữ (nếu có) khi nó không còn cần nữa.
+
+        Chỉ xóa file nằm trong thư mục tải về đã cấu hình, để không bao giờ
+        đụng vào file người dùng để ở nơi khác.
+        """
+        path = (self.current_working_file or {}).get("working_path") or ""
+        if not path or (keep_path and os.path.normcase(path) == os.path.normcase(keep_path)):
+            return
+        if not file_utils.is_in_folder(path, self.config.download_folder):
+            return
+        if file_utils.remove_file(path):
+            self.watcher.forget(path)
+            self.logger.info("Đã dọn file JSON tạm cũ: %s", path)
+            self.append_log(f"Đã dọn file JSON tạm cũ: {os.path.basename(path)}")
 
     def on_file_error(self, message: str) -> None:
         """Nhận tín hiệu lỗi từ watcher (không dùng hộp thoại chặn)."""
@@ -1149,14 +1147,23 @@ class MainWindow(QMainWindow):
             return
         self._open_extract_editor(auto=False)
 
-    def _open_extract_editor(self, auto: bool = False) -> None:
-        """Mở UI kiểm tra/sửa file bóc tách JSON."""
+    def _open_extract_editor(
+        self,
+        auto: bool = False,
+        error_rows: Optional[Dict[int, str]] = None,
+    ) -> None:
+        """Mở UI kiểm tra/sửa file bóc tách JSON.
+
+        ``error_rows`` là các dòng Bước 3 không nhập được ({vị trí trong
+        du_lieu_boc_tach: lý do}); JsonExtractDialog tô đỏ và ghi lý do cho các
+        dòng này để người dùng sửa hoặc xóa.
+        """
         cw = self.current_working_file
         if not cw:
             return
         path = cw.get("working_path") or ""
         try:
-            dialog = JsonExtractDialog(path, self)
+            dialog = JsonExtractDialog(path, self, error_rows=error_rows)
             dialog.exec()
             if dialog.saved:
                 cw["file_size"] = os.path.getsize(path)
@@ -1287,36 +1294,19 @@ class MainWindow(QMainWindow):
             self._update_button_states()
             return
 
-        # Lưu lại đúng bản dữ liệu được dùng cho lần nhập này để còn đối chiếu
-        # về sau (file gốc trong Downloads có thể bị sửa tiếp hoặc xóa).
-        try:
-            snapshot_path = file_utils.copy_download_to_output(
-                source_path, self.config.output_folder
-            )
-        except Exception as exc:  # noqa: BLE001
-            self.logger.exception("Không lưu được bản sao vào thư mục Output.")
-            self.show_error(
-                "Lỗi lưu bản sao",
-                "Không lưu được bản sao của file bóc tách vào thư mục Output.\n"
-                f"Chi tiết: {exc}",
-            )
-            return
-
-        cw["output_path"] = snapshot_path
-        self.logger.info("Đã lưu bản dùng để nhập: %s", snapshot_path)
-        self.append_log(f"Đã lưu bản dùng để nhập: {os.path.basename(snapshot_path)}")
+        # Bước 3 đọc thẳng file JSON tạm mà người dùng vừa xem/sửa ở Bước 2:
+        # không tạo thêm bản sao trong thư mục Output nữa.
         self._update_record_status(
             "DAILY_IMPORT_PENDING",
             note="Đang nhập dữ liệu lên file theo dõi hàng ngày.",
             mark_reviewed=True,
-            output_path=snapshot_path,
         )
 
         self._set_daily_running(True, "Đang phân tích Phiếu cân, Bill và khoản chi...")
         record_id = cw.get("id")
         self._start_daily_worker(
             lambda: self.daily_import_service.analyze(
-                snapshot_path,
+                source_path,
                 daily_path,
                 processed_file_id=record_id,
             ),
@@ -1324,41 +1314,20 @@ class MainWindow(QMainWindow):
         )
 
     def _on_daily_analysis_ready(self, analysis: ImportAnalysis) -> None:
-        if analysis.bill_choices:
-            self.progress_daily.setVisible(False)
-            self.lbl_daily_status.setText("Cần chọn Bill hoặc dòng quyết toán phù hợp.")
-            dialog = BillSelectionDialog(analysis.bill_choices, self)
-            if dialog.exec() != QDialog.Accepted:
-                self._set_daily_running(False, "Đã hủy lần nhập; chưa có dữ liệu nào được ghi.")
-                return
-            decisions = dialog.decisions()
-            for request in analysis.bill_choices:
-                for decision_key in (request.target_subject_key,):
-                    selected = decisions.get(decision_key)
-                    if selected and selected not in ("__SKIP__", "__IGNORE__", "__NO_BILL__"):
-                        self.database.save_match_decision(
-                            decision_key, request.container, selected
-                        )
-                selected_bill = decisions.get(request.subject_key)
-                if selected_bill and selected_bill not in ("__SKIP__", "__IGNORE__", "__NO_BILL__"):
-                    self.database.save_match_decision(
-                        request.subject_key, request.container, selected_bill
-                    )
-                    self.database.save_match_decision(
-                        f"container:{request.container}:{request.close_date or ''}",
-                        request.container,
-                        selected_bill,
-                    )
-            self.progress_daily.setVisible(True)
-            self.lbl_daily_status.setText("Đang áp dụng lựa chọn match...")
-            self._start_daily_worker(
-                lambda: self.daily_import_service.analyze(
-                    analysis.output_path,
-                    analysis.daily_path,
-                    processed_file_id=analysis.processed_file_id,
-                    bill_decisions=decisions,
-                ),
-                self._on_daily_analysis_ready,
+        if analysis.unmatched_rows:
+            self._handle_unmatched_rows(analysis)
+            return
+
+        if not analysis.has_changes:
+            self._set_daily_running(
+                False, "Không có dòng mới nào để nhập vào file theo dõi."
+            )
+            self.show_info(
+                "Không có dữ liệu mới",
+                "Mọi chứng từ trong file bóc tách đều đã có sẵn trong file theo dõi "
+                "(phần mềm đối chiếu bằng cột MD5). File theo dõi giữ nguyên.\n\n"
+                "Muốn nhập lại thì xóa các dòng tương ứng khỏi file theo dõi rồi bấm "
+                "lại nút này.",
             )
             return
 
@@ -1376,8 +1345,8 @@ class MainWindow(QMainWindow):
             f"• Dòng quyết toán mới: {analysis.new_info_count}\n"
             f"• Dòng quyết toán được cập nhật: {analysis.updated_info_count}\n"
             f"• Dòng khoản chi sẽ ghi: {len(analysis.expense_changes)}\n"
-            f"• Chứng từ đã xử lý trước đây: {analysis.duplicate_documents}\n"
-            f"• Dữ liệu còn chờ xử lý: {analysis.pending_count}\n\n"
+            f"• Chứng từ đã có sẵn trong file theo dõi (bỏ qua): "
+            f"{analysis.duplicate_documents}\n\n"
             "Tiếp tục cập nhật file theo dõi hàng ngày?"
         )
         answer = QMessageBox.question(
@@ -1391,7 +1360,7 @@ class MainWindow(QMainWindow):
             self._set_daily_running(False, "Đã hủy trước khi ghi file theo dõi.")
             return
         self.progress_daily.setVisible(True)
-        self.lbl_daily_status.setText("Đang sao lưu và cập nhật file theo dõi...")
+        self.lbl_daily_status.setText("Đang cập nhật file theo dõi...")
         self._start_daily_worker(
             lambda: self.daily_import_service.commit(
                 analysis, conflict_decisions=conflict_decisions
@@ -1399,13 +1368,62 @@ class MainWindow(QMainWindow):
             self._on_daily_commit_finished,
         )
 
+    def _handle_unmatched_rows(self, analysis: ImportAnalysis) -> None:
+        """Hỏi người dùng đúng hai lựa chọn cho các dòng không ghép được.
+
+        Quay lại Bước 2: không ghi gì thêm, mở lại màn hình kiểm tra với các
+        dòng lỗi được tô đỏ. Hủy dòng lỗi: xóa hẳn các dòng đó khỏi JSON tạm rồi
+        phân tích lại để phần còn lại vẫn được nhập trong cùng đợt này.
+        """
+        self.progress_daily.setVisible(False)
+        self.lbl_daily_status.setText(
+            f"{len(analysis.unmatched_rows)} dòng chưa ghép được với dữ liệu quyết toán."
+        )
+        dialog = UnmatchedRowsDialog(analysis.unmatched_rows, self)
+        dialog.exec()
+
+        if dialog.choice != UnmatchedRowsDialog.DROP_ERRORS:
+            self._set_daily_running(
+                False,
+                "Chưa nhập dữ liệu. Hãy sửa hoặc xóa các dòng lỗi ở Bước 2 rồi nhập lại.",
+            )
+            self._open_extract_editor(
+                error_rows={
+                    row.json_index: row.reason
+                    for row in analysis.unmatched_rows
+                    if row.json_index >= 0
+                }
+            )
+            return
+
+        try:
+            removed = remove_extract_rows(
+                analysis.output_path,
+                [row.json_index for row in analysis.unmatched_rows],
+            )
+        except DailyImportError as exc:
+            self._set_daily_running(False, "Không xóa được các dòng lỗi khỏi file JSON.")
+            self.logger.error("Không xóa được dòng lỗi khỏi JSON tạm: %s", exc)
+            self.show_error("Không xóa được dòng lỗi", str(exc))
+            return
+
+        self.logger.info("Đã xóa %s dòng lỗi khỏi file JSON tạm.", removed)
+        self.append_log(f"Đã xóa {removed} dòng lỗi khỏi file JSON tạm.")
+        self._set_daily_running(True, "Đang nhập lại các dòng còn lại...")
+        self._start_daily_worker(
+            lambda: self.daily_import_service.analyze(
+                analysis.output_path,
+                analysis.daily_path,
+                processed_file_id=analysis.processed_file_id,
+            ),
+            self._on_daily_analysis_ready,
+        )
+
     def _on_daily_commit_finished(self, summary: ImportSummary) -> None:
         self._set_daily_running(False)
         cw = self.current_working_file or {}
         cw["status"] = summary.status
-        self.lbl_daily_status.setText(
-            "Hoàn tất." if not summary.pending_count else "Đã nhập một phần; còn dữ liệu chờ xử lý."
-        )
+        self.lbl_daily_status.setText("Hoàn tất.")
         self._update_current_file_labels(
             note=(
                 f"Đã cập nhật file theo dõi: {summary.new_info} dòng mới, "
@@ -1424,8 +1442,7 @@ class MainWindow(QMainWindow):
             f"Dòng quyết toán cập nhật: {summary.updated_info}\n"
             f"Khoản chi mới: {summary.new_expenses}\n"
             f"Khoản chi cập nhật: {summary.updated_expenses}\n"
-            f"Chứng từ trùng được bỏ qua: {summary.duplicate_documents}\n"
-            f"Dữ liệu còn chờ: {summary.pending_count}"
+            f"Chứng từ đã có sẵn nên bỏ qua: {summary.duplicate_documents}"
         )
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Information)
@@ -1437,18 +1454,22 @@ class MainWindow(QMainWindow):
         if box.clickedButton() is open_button:
             self._open_daily_file()
 
-        # Dữ liệu chưa ghép được phải xử lý ngay, nếu không sẽ bị bỏ quên.
-        if summary.pending_count:
-            self._show_pending_data()
+        # Lô này đã nhập xong và không còn dòng lỗi -> dọn bộ nhớ tạm.
+        self._finish_temp_json()
 
-    def _show_pending_data(self) -> None:
-        """Mở hộp thoại dữ liệu chờ; nếu người dùng yêu cầu thì nhập lại luôn."""
-        dialog = PendingDataDialog(self.database, self)
-        dialog.exec()
-        self._refresh_daily_labels()
-        self._update_button_states()
-        if dialog.retry_requested:
-            self.on_import_daily()
+    def _finish_temp_json(self) -> None:
+        """Dọn file JSON tạm sau khi đã nhập xong toàn bộ lô."""
+        self._discard_temp_json()
+        self.current_working_file = None
+        self.overall_status = "DAILY_IMPORTED"
+        # Không tự tay reset _last_saved_shown ở đây: để _refresh_saved_label thấy
+        # giá trị cũ khác giá trị mới ("") mà xóa dòng “Lưu thành công lần cuối”,
+        # nếu không nhãn sẽ kẹt lại mốc giờ của file vừa bị dọn.
+        self._update_current_file_labels()
+        self.lbl_file_note.setText(
+            "Đã nhập xong lô này; file JSON tạm đã được dọn. Bấm “Mở trợ lý” ở Bước 1 "
+            "khi có lô chứng từ mới."
+        )
 
     def _open_daily_file(self) -> None:
         path = self.config.daily_tracking_file

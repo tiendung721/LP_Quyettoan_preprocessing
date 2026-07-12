@@ -14,9 +14,13 @@ from app.daily_import import (
     EXPENSE_SHEET,
     INFO_HEADERS,
     INFO_SHEET,
+    REASON_MANY_BILLS,
+    REASON_MANY_TARGETS,
+    REASON_NO_TARGET,
     DailyImportError,
     DailyImportService,
     normalize_cargo,
+    remove_extract_rows,
 )
 from app.database import Database
 
@@ -178,6 +182,85 @@ class DailyImportServiceTests(unittest.TestCase):
         self.assertEqual(len(again.expense_changes), 0)
         self.assertEqual(again.duplicate_documents, 3)
 
+    def test_reimport_after_deleting_rows_from_daily(self) -> None:
+        """File theo dõi là sổ cái: xóa dòng khỏi Excel thì nhập lại được ngay.
+
+        Trước đây “đã nhập” chỉ nằm trong SQLite nên xóa dòng khỏi Excel xong nhập
+        lại vẫn bị báo “đã nhập rồi”, phải xóa app_state.db mới nhập lại được.
+        """
+        self._make_output()
+        self.service.commit(self.service.analyze(str(self.output), str(self.daily), 1))
+
+        # Chưa xóa gì: chứng từ đã có MD5 trong file theo dõi -> bỏ qua.
+        again = self.service.analyze(str(self.output), str(self.daily), 1)
+        self.assertEqual(again.duplicate_documents, 3)
+        self.assertFalse(again.has_changes)
+
+        # Người dùng xóa các dòng app vừa ghi khỏi file theo dõi.
+        wb = load_workbook(self.daily)
+        wb[INFO_SHEET].delete_rows(4)  # dòng quyết toán mới (Phiếu cân + Bill)
+        wb[EXPENSE_SHEET].delete_rows(2)  # dòng khoản chi
+        wb.save(self.daily)
+        wb.close()
+
+        # MD5 không còn trong Excel -> nhập lại được, không phải đụng vào database.
+        third = self.service.analyze(str(self.output), str(self.daily), 1)
+        self.assertEqual(third.duplicate_documents, 0)
+        self.assertEqual(third.new_info_count, 1)
+        self.assertEqual(len(third.expense_changes), 1)
+        self.assertEqual(third.expense_changes[0].values["SQT PM"], 101)
+
+        summary = self.service.commit(third)
+        self.assertEqual(summary.new_info, 1)
+        self.assertEqual(summary.new_expenses, 1)
+
+    def test_unwritten_rows_of_same_document_are_not_skipped(self) -> None:
+        """Một file chứng từ sinh nhiều dòng: dòng chưa ghi không bị coi là đã nhập.
+
+        Ảnh khoản chi của người dùng có 4 container dùng chung một MD5. Nếu chỉ đối
+        chiếu theo MD5 thì 1 dòng được ghi sẽ làm 3 dòng còn lại bị bỏ qua oan.
+        """
+        shared = {
+            "file_nguon": "chi-4-cont.jpg",
+            "ma_md5_file": "cost-shared",
+            "loai_chung_tu": "Khoản chi",
+            "ngay_chay": "03/06/2026",
+            "so_hd": "51",
+        }
+        self._write_output_rows(
+            {**shared, "so_container": "EFGH1234567", "tong_tien": 1_000_000},
+            {**shared, "so_container": "AAAA1111111", "tong_tien": 2_000_000},
+            {**shared, "so_container": "BBBB2222222", "tong_tien": 3_000_000},
+        )
+
+        # Chỉ EFGH1234567 khớp SQT 101; hai dòng kia không ghép được.
+        first = self.service.analyze(str(self.output), str(self.daily), 1)
+        self.assertEqual(len(first.expense_changes), 1)
+        self.assertEqual(first.expense_changes[0].values["Số Container"], "EFGH1234567")
+        self.assertEqual(len(first.unmatched_rows), 2)
+
+        # Người dùng bỏ hai dòng lỗi -> dòng đạt được ghi (MD5 vào file theo dõi).
+        remove_extract_rows(
+            str(self.output), [row.json_index for row in first.unmatched_rows]
+        )
+        second = self.service.analyze(str(self.output), str(self.daily), 1)
+        self.service.commit(second)
+        self.assertEqual(self._expense_sqt_column(), [101])
+
+        # Tải lại đúng file JSON đó: dòng đã ghi bị bỏ qua, hai dòng kia vẫn được
+        # xét lại chứ không bị "ăn theo" MD5 của dòng đã ghi.
+        self._write_output_rows(
+            {**shared, "so_container": "EFGH1234567", "tong_tien": 1_000_000},
+            {**shared, "so_container": "AAAA1111111", "tong_tien": 2_000_000},
+            {**shared, "so_container": "BBBB2222222", "tong_tien": 3_000_000},
+        )
+        third = self.service.analyze(str(self.output), str(self.daily), 1)
+        self.assertEqual(third.expense_changes, [])
+        self.assertEqual(
+            sorted(row.container for row in third.unmatched_rows),
+            ["AAAA1111111", "BBBB2222222"],
+        )
+
     def test_bill_without_scale_is_persisted(self) -> None:
         self._write_output_rows(
             {
@@ -208,7 +291,7 @@ class DailyImportServiceTests(unittest.TestCase):
             self.service.analyze(str(self.output), str(self.daily), 1)
         self.assertIn("du_lieu_boc_tach", str(ctx.exception))
 
-    def test_multiple_bills_requires_and_remembers_user_choice(self) -> None:
+    def test_multiple_bills_are_unmatched_and_can_be_dropped(self) -> None:
         rows = [
             {
                 "file_nguon": "scale.jpg",
@@ -240,37 +323,32 @@ class DailyImportServiceTests(unittest.TestCase):
             )
         self._write_output_rows(*rows)
 
+        # Container khớp nhiều Bill -> không tự đoán, không hỏi chọn tay.
         first = self.service.analyze(str(self.output), str(self.daily), 1)
-        self.assertEqual(len(first.bill_choices), 1)
-        request = first.bill_choices[0]
-        selected = "bill-choice-b"
-        self.db.save_match_decision(request.subject_key, request.container, selected)
-        self.db.save_match_decision(
-            f"container:{request.container}:{request.close_date}",
-            request.container,
-            selected,
+        self.assertEqual(first.info_changes, [])
+        self.assertEqual(len(first.unmatched_rows), 3)
+        self.assertEqual(
+            {row.reason for row in first.unmatched_rows}, {REASON_MANY_BILLS}
         )
-        second = self.service.analyze(
-            str(self.output),
-            str(self.daily),
-            1,
-            bill_decisions={request.subject_key: selected},
+        self.assertEqual(
+            sorted(row.json_index for row in first.unmatched_rows), [0, 1, 2]
         )
-        self.assertEqual(len(second.bill_choices), 0)
-        self.assertEqual(second.new_info_count, 1)
-        self.assertEqual(second.info_changes[0].values["Tên tàu"], "TÀU B 02S")
-        self.service.commit(second)
+        # Dòng lỗi không nằm lại hàng chờ để bắt người dùng xử lý sau.
+        self.assertEqual(self.db.count_pending_rows(), 0)
 
-        third = self.service.analyze(str(self.output), str(self.daily), 1)
-        self.assertEqual(third.new_info_count, 0)
-        self.assertEqual(third.updated_info_count, 0)
-        remaining = [
-            item
-            for item in self.db.list_staged_rows()
-            if item.get("document_md5") == "bill-choice-a"
-        ]
-        self.assertEqual(len(remaining), 1)
-        self.assertEqual(remaining[0]["state"], "WAITING_SCALE")
+        # Người dùng chọn “Hủy các dòng lỗi và nhập các dòng còn lại”.
+        removed = remove_extract_rows(
+            str(self.output), [row.json_index for row in first.unmatched_rows]
+        )
+        self.assertEqual(removed, 3)
+
+        second = self.service.analyze(str(self.output), str(self.daily), 1)
+        self.assertEqual(second.unmatched_rows, [])
+        self.assertFalse(second.has_changes)
+        with open(self.output, encoding="utf-8") as f:
+            payload = json.load(f)
+        self.assertEqual(payload["du_lieu_boc_tach"], [])
+        self.assertEqual(payload["metadata"]["tong_so_dong_boc_tach"], 0)
 
     def test_expense_matches_by_date_and_container_without_invoice(self) -> None:
         self._write_output_rows(
@@ -320,24 +398,9 @@ class DailyImportServiceTests(unittest.TestCase):
         self.assertEqual(analysis.info_changes[0].values["Biển số xe"], "15H 22404")
         self.assertEqual(analysis.info_changes[0].values["MD5"], "")
 
-    def test_multiple_sqt_requires_target_choice(self) -> None:
-        wb = load_workbook(self.daily)
-        ws = wb[INFO_SHEET]
-        values = {name: None for name in LEGACY_INFO_HEADERS}
-        values.update(
-            {
-                "SQT PM": 200,
-                "Ngày Đóng": datetime(2026, 6, 12),
-                "Số Container": "MULT1234567",
-                "Số tấn": 20,
-            }
-        )
-        ws.append([values[name] for name in LEGACY_INFO_HEADERS])
-        values["SQT PM"] = 201
-        values["Số tấn"] = 21
-        ws.append([values[name] for name in LEGACY_INFO_HEADERS])
-        wb.save(self.daily)
-        wb.close()
+    def test_scale_matching_multiple_sqt_is_unmatched(self) -> None:
+        self._append_info_row(200, datetime(2026, 6, 12), "MULT1234567", 20)
+        self._append_info_row(201, datetime(2026, 6, 12), "MULT1234567", 21)
 
         self._write_output_rows(
             {
@@ -349,19 +412,133 @@ class DailyImportServiceTests(unittest.TestCase):
                 "so_tan": 22,
             }
         )
-        first = self.service.analyze(str(self.output), str(self.daily), 1)
-        self.assertEqual(len(first.bill_choices), 1)
-        request = first.bill_choices[0]
-        self.assertEqual(len(request.target_candidates), 2)
+        analysis = self.service.analyze(str(self.output), str(self.daily), 1)
+        self.assertEqual(analysis.info_changes, [])
+        self.assertEqual(len(analysis.unmatched_rows), 1)
+        self.assertEqual(analysis.unmatched_rows[0].reason, REASON_MANY_TARGETS)
+        self.assertEqual(analysis.unmatched_rows[0].doc_label, "Phiếu cân")
 
-        second = self.service.analyze(
-            str(self.output),
-            str(self.daily),
-            1,
-            bill_decisions={request.target_subject_key: "sqt:201"},
+    def test_bill_of_ambiguous_container_is_reported_not_dropped(self) -> None:
+        """Phiếu cân khớp nhiều SQT: Bill đi kèm cũng phải được báo, không âm thầm bỏ."""
+        self._append_info_row(200, datetime(2026, 6, 12), "MULT1234567", 20)
+        self._append_info_row(201, datetime(2026, 6, 12), "MULT1234567", 21)
+
+        self._write_output_rows(
+            {
+                "file_nguon": "scale-multi.jpg",
+                "ma_md5_file": "scale-multi",
+                "loai_chung_tu": "Phiếu cân",
+                "ngay_dong": "12/06/2026",
+                "so_container": "MULT1234567",
+                "so_tan": 22,
+            },
+            {
+                "file_nguon": "bill-multi.pdf",
+                "ma_md5_file": "bill-multi",
+                "loai_chung_tu": "Bill",
+                "so_container": "MULT1234567",
+                "so_bill": "BL-MULTI",
+                "ten_tau": "TÀU M 09S",
+                "ngay_chay": "13/06/2026",
+            },
         )
-        self.assertEqual(len(second.bill_choices), 0)
-        self.assertEqual(second.info_changes[0].sqt, 201)
+
+        analysis = self.service.analyze(str(self.output), str(self.daily), 1)
+        self.assertEqual(analysis.info_changes, [])
+        self.assertEqual(
+            sorted(row.doc_label for row in analysis.unmatched_rows),
+            ["Bill", "Phiếu cân"],
+        )
+        self.assertEqual(
+            {row.reason for row in analysis.unmatched_rows}, {REASON_MANY_TARGETS}
+        )
+        self.assertEqual(
+            sorted(row.json_index for row in analysis.unmatched_rows), [0, 1]
+        )
+
+    def test_expense_without_matching_sqt_is_not_written(self) -> None:
+        self._write_output_rows(
+            {
+                "file_nguon": "cost-orphan.jpg",
+                "ma_md5_file": "cost-orphan",
+                "loai_chung_tu": "Khoản chi",
+                "ngay_chay": "20/06/2026",
+                "so_container": "WXYZ1234567",
+                "so_hd": "77",
+                "don_gia": 1_500_000,
+                "tong_tien": 42_000_000,
+            }
+        )
+
+        analysis = self.service.analyze(str(self.output), str(self.daily), 1)
+        self.assertEqual(analysis.expense_changes, [])
+        self.assertEqual(len(analysis.unmatched_rows), 1)
+        unmatched = analysis.unmatched_rows[0]
+        self.assertEqual(unmatched.doc_label, "Khoản chi")
+        self.assertEqual(unmatched.container, "WXYZ1234567")
+        self.assertEqual(unmatched.match_date, "2026-06-20")
+        self.assertEqual(unmatched.reference, "HĐ 77")
+        self.assertEqual(unmatched.reason, REASON_NO_TARGET)
+        self.assertEqual(unmatched.json_index, 0)
+        self.assertEqual(self.db.count_pending_rows(), 0)
+
+        self.service.commit(analysis)
+        self.assertEqual(self._expense_sqt_column(), [])
+
+    def test_expense_matching_multiple_sqt_is_not_written(self) -> None:
+        # Cùng container + cùng ngày nhưng hai dòng quyết toán -> không rõ SQT nào.
+        self._append_info_row(300, datetime(2026, 6, 3), "EFGH1234567", 27)
+
+        self._write_output_rows(
+            {
+                "file_nguon": "cost-ambiguous.jpg",
+                "ma_md5_file": "cost-ambiguous",
+                "loai_chung_tu": "Khoản chi",
+                "ngay_chay": "03/06/2026",
+                "so_container": "EFGH1234567",
+                "so_hd": "88",
+                "tong_tien": 10_000_000,
+            }
+        )
+
+        analysis = self.service.analyze(str(self.output), str(self.daily), 1)
+        self.assertEqual(analysis.expense_changes, [])
+        self.assertEqual(len(analysis.unmatched_rows), 1)
+        self.assertEqual(analysis.unmatched_rows[0].reason, REASON_MANY_TARGETS)
+
+        self.service.commit(analysis)
+        self.assertEqual(self._expense_sqt_column(), [])
+
+    # ------------------------------------------------------------------ #
+    def _append_info_row(
+        self, sqt: int, close_date: datetime, container: str, tons: float
+    ) -> None:
+        wb = load_workbook(self.daily)
+        ws = wb[INFO_SHEET]
+        values = {name: None for name in LEGACY_INFO_HEADERS}
+        values.update(
+            {
+                "SQT PM": sqt,
+                "Ngày Đóng": close_date,
+                "Số Container": container,
+                "Số tấn": tons,
+            }
+        )
+        ws.append([values[name] for name in LEGACY_INFO_HEADERS])
+        wb.save(self.daily)
+        wb.close()
+
+    def _expense_sqt_column(self) -> list:
+        """Các giá trị SQT PM đã ghi vào sheet Khoan_Chi."""
+        wb = load_workbook(self.daily)
+        expense = wb[EXPENSE_SHEET]
+        headers = {cell.value: cell.column for cell in expense[1]}
+        written = [
+            expense.cell(row, headers["SQT PM"]).value
+            for row in range(2, expense.max_row + 1)
+        ]
+        wb.close()
+        return written
 
 
 if __name__ == "__main__":
