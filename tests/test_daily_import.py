@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import tempfile
 import unittest
@@ -13,16 +14,15 @@ from app.daily_import import (
     EXPENSE_SHEET,
     INFO_HEADERS,
     INFO_SHEET,
-    OUTPUT_HEADERS,
-    OUTPUT_SHEET,
+    DailyImportError,
     DailyImportService,
     normalize_cargo,
 )
 from app.database import Database
 
 
-LEGACY_INFO_HEADERS = [h for h in INFO_HEADERS if h != "Trạng thái kiểm tra"]
-LEGACY_EXPENSE_HEADERS = [h for h in EXPENSE_HEADERS if h != "Trạng thái kiểm tra"]
+LEGACY_INFO_HEADERS = list(INFO_HEADERS)
+LEGACY_EXPENSE_HEADERS = list(EXPENSE_HEADERS)
 
 
 class DailyImportServiceTests(unittest.TestCase):
@@ -33,7 +33,7 @@ class DailyImportServiceTests(unittest.TestCase):
         self.db.init_db()
         self.service = DailyImportService(self.db, logging.getLogger("daily-test"))
         self.daily = self.root / "daily.xlsx"
-        self.output = self.root / "output.xlsx"
+        self.output = self.root / "output.json"
         self._make_daily()
 
     def tearDown(self) -> None:
@@ -79,65 +79,64 @@ class DailyImportServiceTests(unittest.TestCase):
         wb.close()
 
     def _make_output(self) -> None:
-        wb = Workbook()
-        ws = wb.active
-        ws.title = OUTPUT_SHEET
-        ws.append(OUTPUT_HEADERS)
+        self._write_output_rows(
+            {
+                "file_nguon": "scale.jpg",
+                "ma_md5_file": "scale-md5",
+                "loai_chung_tu": "Phiếu cân",
+                "trang_thai": "OK",
+                "ngay_dong": "05/06/2026",
+                "so_container": "IJKL 1234567",
+                "so_tan": 29.5,
+                "loai_hang": "VOI ROI",
+                "noi_dong": "Kho C",
+                "nguoi_nhan": "LÊ PHẠM",
+                "truong_khac": {"so_phieu": "0000733"},
+                "do_tin_cay": "Cao",
+                "canh_bao": [],
+            },
+            {
+                "file_nguon": "bill.pdf",
+                "ma_md5_file": "bill-md5",
+                "loai_chung_tu": "Bill",
+                "trang_thai": "OK",
+                "so_container": "IJKL1234567",
+                "ten_tau": "TÀU C 03S",
+                "ngay_chay": "06/06/2026",
+                "vt_bien": "Hãng C",
+                "so_bill": "BILL-03",
+                "so_chi_seal": "SEAL03",
+                "do_tin_cay": "Cao",
+            },
+            {
+                "file_nguon": "cost.jpg",
+                "ma_md5_file": "cost-md5",
+                "loai_chung_tu": "Khoản chi",
+                "trang_thai": "OK",
+                "ngay_chay": "03/06/2026",
+                "so_container": "EFGH1234567",
+                "so_hd": "51",
+                "don_gia": 1_700_000,
+                "thanh_tien": 45_900_000,
+                "vat": 3_672_000,
+                "tong_tien": 49_572_000,
+                "do_tin_cay": "Cao",
+                "canh_bao": [{"noi_dung": "Kiểm tra VAT"}],
+            },
+        )
 
-        def add(**kwargs):
-            row = {name: None for name in OUTPUT_HEADERS}
-            row.update(kwargs)
-            ws.append([row[name] for name in OUTPUT_HEADERS])
-
-        add(
-            **{
-                "File nguồn": "scale.jpg",
-                "Mã MD5 file": "scale-md5",
-                "Loại chứng từ": "Phiếu cân",
-                "Trạng thái": "OK",
-                "Ngày Đóng": "05/06/2026",
-                "Số Container": "IJKL 1234567",
-                "Số tấn": 29.5,
-                "Loại hàng": "VOI ROI",
-                "Nơi đóng": "Kho C",
-                "Độ tin cậy": "Cao",
-            }
-        )
-        add(
-            **{
-                "File nguồn": "bill.pdf",
-                "Mã MD5 file": "bill-md5",
-                "Loại chứng từ": "Bill",
-                "Trạng thái": "OK",
-                "Số Container": "IJKL1234567",
-                "Tên tàu": "TÀU C 03S",
-                "Ngày chạy": "06/06/2026",
-                "VT biển": "Hãng C",
-                "Số Bill": "BILL-03",
-                "Số chì/Seal": "SEAL03",
-                "Độ tin cậy": "Cao",
-            }
-        )
-        add(
-            **{
-                "File nguồn": "cost.jpg",
-                "Mã MD5 file": "cost-md5",
-                "Loại chứng từ": "Khoản chi",
-                "Trạng thái": "OK",
-                "Ngày chạy": "03/06/2026",
-                "Số Container": "EFGH1234567",
-                "Số HĐ": "51",
-                "Đơn giá": 1_700_000,
-                "Thành tiền": 45_900_000,
-                "VAT": 3_672_000,
-                "Tổng tiền": 49_572_000,
-                "Độ tin cậy": "Cao",
-            }
-        )
-        for _ in range(5):
-            ws.append([None] * len(OUTPUT_HEADERS))
-        wb.save(self.output)
-        wb.close()
+    def _write_output_rows(self, *rows: dict) -> None:
+        payload = {
+            "metadata": {
+                "phien_ban_schema": "1.0",
+                "tong_so_dong_boc_tach": len(rows),
+            },
+            "du_lieu_boc_tach": list(rows),
+            "canh_bao": [],
+            "raw_data": [],
+        }
+        with open(self.output, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
 
     def test_normalize_cargo_with_vietnamese_accents(self) -> None:
         self.assertEqual(normalize_cargo("VOI")[0], "Vôi")
@@ -162,14 +161,16 @@ class DailyImportServiceTests(unittest.TestCase):
         wb = load_workbook(self.daily, data_only=False)
         info = wb[INFO_SHEET]
         expense = wb[EXPENSE_SHEET]
-        self.assertIn("Trạng thái kiểm tra", [cell.value for cell in info[1]])
-        self.assertIn("Trạng thái kiểm tra", [cell.value for cell in expense[1]])
+        self.assertIn("MD5", [cell.value for cell in info[1]])
+        self.assertIn("MD5", [cell.value for cell in expense[1]])
         self.assertEqual(info.max_row, 4)
         self.assertEqual(expense.max_row, 2)
         headers = {cell.value: cell.column for cell in info[1]}
         self.assertEqual(info.cell(2, headers["Trạng thái nhập"]).value, "Đã nhập")
         self.assertEqual(info.cell(4, headers["SQT PM"]).value, 102)
         self.assertEqual(info.cell(4, headers["Loại hàng"]).value, "Vôi rời")
+        self.assertEqual(info.cell(4, headers["Người nhận"]).value, "LÊ PHẠM")
+        self.assertEqual(info.cell(4, headers["Trạng thái nhập"]).value, "Chưa nhập")
         wb.close()
 
         again = self.service.analyze(str(self.output), str(self.daily), 1)
@@ -178,74 +179,66 @@ class DailyImportServiceTests(unittest.TestCase):
         self.assertEqual(again.duplicate_documents, 3)
 
     def test_bill_without_scale_is_persisted(self) -> None:
-        wb = Workbook()
-        ws = wb.active
-        ws.title = OUTPUT_SHEET
-        ws.append(OUTPUT_HEADERS)
-        data = {name: None for name in OUTPUT_HEADERS}
-        data.update(
+        self._write_output_rows(
             {
-                "File nguồn": "waiting.pdf",
-                "Mã MD5 file": "waiting-bill",
-                "Loại chứng từ": "Bill",
-                "Số Container": "MNOP1234567",
-                "Tên tàu": "TÀU CHỜ 01S",
-                "Ngày chạy": "10/06/2026",
-                "VT biển": "Hãng chờ",
+                "file_nguon": "waiting.pdf",
+                "ma_md5_file": "waiting-bill",
+                "loai_chung_tu": "Bill",
+                "so_container": "MNOP1234567",
+                "ten_tau": "TÀU CHỜ 01S",
+                "ngay_chay": "10/06/2026",
+                "vt_bien": "Hãng chờ",
             }
         )
-        ws.append([data[name] for name in OUTPUT_HEADERS])
-        wb.save(self.output)
-        wb.close()
 
         analysis = self.service.analyze(str(self.output), str(self.daily), 1)
-        self.assertEqual(analysis.new_info_count, 0)
-        pending = self.db.list_staged_rows()
-        self.assertEqual(len(pending), 1)
-        self.assertEqual(pending[0]["state"], "WAITING_SCALE")
+        self.assertEqual(analysis.new_info_count, 1)
+        self.assertEqual(analysis.info_changes[0].values["Số Container"], "MNOP1234567")
+        self.assertEqual(analysis.info_changes[0].values["Tên tàu"], "TÀU CHỜ 01S")
+
+        summary = self.service.commit(analysis)
+        self.assertEqual(summary.new_info, 1)
+        self.assertEqual(summary.pending_count, 0)
+
+    def test_invalid_json_schema_is_reported(self) -> None:
+        with open(self.output, "w", encoding="utf-8") as f:
+            json.dump({"metadata": {}}, f)
+
+        with self.assertRaises(DailyImportError) as ctx:
+            self.service.analyze(str(self.output), str(self.daily), 1)
+        self.assertIn("du_lieu_boc_tach", str(ctx.exception))
 
     def test_multiple_bills_requires_and_remembers_user_choice(self) -> None:
-        wb = Workbook()
-        ws = wb.active
-        ws.title = OUTPUT_SHEET
-        ws.append(OUTPUT_HEADERS)
-
-        def add(**kwargs):
-            data = {name: None for name in OUTPUT_HEADERS}
-            data.update(kwargs)
-            ws.append([data[name] for name in OUTPUT_HEADERS])
-
-        add(
-            **{
-                "File nguồn": "scale.jpg",
-                "Mã MD5 file": "scale-choice",
-                "Loại chứng từ": "Phiếu cân",
-                "Trạng thái": "OK",
-                "Ngày Đóng": "08/06/2026",
-                "Số Container": "QRST1234567",
-                "Số tấn": 28,
-                "Loại hàng": "VOI",
+        rows = [
+            {
+                "file_nguon": "scale.jpg",
+                "ma_md5_file": "scale-choice",
+                "loai_chung_tu": "Phiếu cân",
+                "trang_thai": "OK",
+                "ngay_dong": "08/06/2026",
+                "so_container": "QRST1234567",
+                "so_tan": 28,
+                "loai_hang": "VOI",
             }
-        )
+        ]
         for md5, bill_no, vessel in (
             ("bill-choice-a", "BILL-A", "TÀU A 01S"),
             ("bill-choice-b", "BILL-B", "TÀU B 02S"),
         ):
-            add(
-                **{
-                    "File nguồn": bill_no + ".pdf",
-                    "Mã MD5 file": md5,
-                    "Loại chứng từ": "Bill",
-                    "Trạng thái": "OK",
-                    "Số Container": "QRST1234567",
-                    "Số Bill": bill_no,
-                    "Tên tàu": vessel,
-                    "Ngày chạy": "09/06/2026",
-                    "VT biển": "Hãng tàu",
+            rows.append(
+                {
+                    "file_nguon": bill_no + ".pdf",
+                    "ma_md5_file": md5,
+                    "loai_chung_tu": "Bill",
+                    "trang_thai": "OK",
+                    "so_container": "QRST1234567",
+                    "so_bill": bill_no,
+                    "ten_tau": vessel,
+                    "ngay_chay": "09/06/2026",
+                    "vt_bien": "Hãng tàu",
                 }
             )
-        wb.save(self.output)
-        wb.close()
+        self._write_output_rows(*rows)
 
         first = self.service.analyze(str(self.output), str(self.daily), 1)
         self.assertEqual(len(first.bill_choices), 1)
@@ -278,6 +271,97 @@ class DailyImportServiceTests(unittest.TestCase):
         ]
         self.assertEqual(len(remaining), 1)
         self.assertEqual(remaining[0]["state"], "WAITING_SCALE")
+
+    def test_expense_matches_by_date_and_container_without_invoice(self) -> None:
+        self._write_output_rows(
+            {
+                "file_nguon": "cost-1.jpg",
+                "ma_md5_file": "cost-one",
+                "loai_chung_tu": "Khoản chi",
+                "ngay_chay": "03/06/2026",
+                "so_container": "EFGH1234567",
+                "so_hd": "OLD",
+                "don_gia": 100,
+            }
+        )
+        first = self.service.analyze(str(self.output), str(self.daily), 1)
+        self.service.commit(first)
+
+        self._write_output_rows(
+            {
+                "file_nguon": "cost-2.jpg",
+                "ma_md5_file": "cost-two",
+                "loai_chung_tu": "Khoản chi",
+                "ngay_chay": "03/06/2026",
+                "so_container": "EFGH1234567",
+                "so_hd": "NEW",
+                "vat": 10,
+            }
+        )
+        second = self.service.analyze(str(self.output), str(self.daily), 1)
+        self.assertEqual(len(second.expense_changes), 1)
+        self.assertEqual(second.expense_changes[0].action, "UPDATE")
+
+    def test_missing_md5_still_imports(self) -> None:
+        self._write_output_rows(
+            {
+                "file_nguon": "scale-no-md5.jpg",
+                "loai_chung_tu": "Phiếu cân",
+                "ngay_dong": "11/06/2026",
+                "so_container": "ZZZZ1234567",
+                "bien_so_xe": "15H 22404",
+                "so_tan": 25,
+                "loai_hang": "VOI",
+            }
+        )
+
+        analysis = self.service.analyze(str(self.output), str(self.daily), 1)
+        self.assertEqual(analysis.new_info_count, 1)
+        self.assertEqual(analysis.info_changes[0].values["Biển số xe"], "15H 22404")
+        self.assertEqual(analysis.info_changes[0].values["MD5"], "")
+
+    def test_multiple_sqt_requires_target_choice(self) -> None:
+        wb = load_workbook(self.daily)
+        ws = wb[INFO_SHEET]
+        values = {name: None for name in LEGACY_INFO_HEADERS}
+        values.update(
+            {
+                "SQT PM": 200,
+                "Ngày Đóng": datetime(2026, 6, 12),
+                "Số Container": "MULT1234567",
+                "Số tấn": 20,
+            }
+        )
+        ws.append([values[name] for name in LEGACY_INFO_HEADERS])
+        values["SQT PM"] = 201
+        values["Số tấn"] = 21
+        ws.append([values[name] for name in LEGACY_INFO_HEADERS])
+        wb.save(self.daily)
+        wb.close()
+
+        self._write_output_rows(
+            {
+                "file_nguon": "scale-multi.jpg",
+                "ma_md5_file": "scale-multi",
+                "loai_chung_tu": "Phiếu cân",
+                "ngay_dong": "12/06/2026",
+                "so_container": "MULT1234567",
+                "so_tan": 22,
+            }
+        )
+        first = self.service.analyze(str(self.output), str(self.daily), 1)
+        self.assertEqual(len(first.bill_choices), 1)
+        request = first.bill_choices[0]
+        self.assertEqual(len(request.target_candidates), 2)
+
+        second = self.service.analyze(
+            str(self.output),
+            str(self.daily),
+            1,
+            bill_decisions={request.target_subject_key: "sqt:201"},
+        )
+        self.assertEqual(len(second.bill_choices), 0)
+        self.assertEqual(second.info_changes[0].sqt, 201)
 
 
 if __name__ == "__main__":

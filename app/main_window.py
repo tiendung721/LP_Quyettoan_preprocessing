@@ -53,6 +53,7 @@ from .daily_import_ui import (
     BillSelectionDialog,
     ConflictDialog,
     FunctionWorker,
+    JsonExtractDialog,
     PendingDataDialog,
 )
 from .database import Database
@@ -152,8 +153,8 @@ class MainWindow(QMainWindow):
         self._load_last_record()
         self._start_watcher()
 
-        # Người dùng bấm Lưu trong Excel (ngoài phần mềm) nên phải tự soi lại
-        # thời điểm lưu của file bóc tách để nhãn ở Bước 2 luôn đúng.
+        # Người dùng bấm Lưu trong JSON editor nên soi lại thời điểm lưu của file
+        # bóc tách để nhãn ở Bước 2 luôn đúng.
         self._saved_timer = QTimer(self)
         self._saved_timer.setInterval(2000)
         self._saved_timer.timeout.connect(self._refresh_saved_label)
@@ -495,9 +496,9 @@ class MainWindow(QMainWindow):
             "2", "Xem file bóc tách dữ liệu"
         )
         guide2.addWidget(self._guide_label(
-            "Khi trợ lý tải file về, phần mềm tự mở file cho bạn kiểm tra. Bấm nút "
-            "này để mở lại file bất cứ lúc nào. Sửa xong hãy lưu (Ctrl+S) và đóng "
-            "file — dòng “Lưu lần cuối” sẽ tự cập nhật."
+            "Khi trợ lý tải file JSON về, phần mềm tự mở màn hình kiểm tra dữ liệu. "
+            "Bấm nút này để mở lại bất cứ lúc nào. Sửa xong hãy bấm “Lưu”; dòng "
+            "“Lưu lần cuối” sẽ tự cập nhật."
         ))
         self.lbl_file_name = QLabel("Chưa có file bóc tách")
         self.lbl_file_name.setObjectName("fileName")
@@ -525,10 +526,9 @@ class MainWindow(QMainWindow):
             "3", "Nhập lên file hàng ngày"
         )
         guide3.addWidget(self._guide_label(
-            "Phần mềm lấy đúng bản lưu mới nhất của file bóc tách, ghép Phiếu cân, "
-            "Bill và khoản chi rồi cập nhật file theo dõi hàng ngày. Hãy đóng file "
-            "bóc tách trong Excel trước khi bấm. Dữ liệu chưa đủ điều kiện sẽ được "
-            "hiện ra ngay sau khi nhập để bạn bổ sung."
+            "Phần mềm lấy đúng bản JSON đã lưu mới nhất, ghép Phiếu cân, Bill và "
+            "khoản chi rồi cập nhật file theo dõi hàng ngày. Dữ liệu chưa đủ điều "
+            "kiện sẽ được hiện ra ngay sau khi nhập để bạn bổ sung."
         ))
         self.lbl_daily_status = QLabel("Chưa nhập dữ liệu vào file theo dõi.")
         self.lbl_daily_status.setObjectName("hintText")
@@ -832,9 +832,8 @@ class MainWindow(QMainWindow):
     def _update_button_states(self) -> None:
         """Bật/tắt các nút theo việc đã có file hay chưa.
 
-        Không kiểm tra khóa file ở đây: nếu file đang mở trong Excel mà tắt nút
-        thì người dùng đóng Excel xong nút vẫn kẹt ở trạng thái tắt. Việc kiểm
-        tra khóa được làm ngay lúc bấm nút, kèm thông báo hướng dẫn.
+        Không kiểm tra khóa file ở đây; việc kiểm tra file theo dõi đang mở được
+        làm ngay lúc bấm nút, kèm thông báo hướng dẫn.
         """
         cw = self.current_working_file
         has_file = bool(cw and os.path.exists(cw.get("working_path") or ""))
@@ -1111,20 +1110,20 @@ class MainWindow(QMainWindow):
     def on_output_ready(self, result: Dict[str, Any]) -> None:
         """Nhận tín hiệu từ watcher khi có file bóc tách mới.
 
-        File tải về giữ nguyên trong Downloads và tự mở trong Excel; đây là bản
-        gốc duy nhất, người dùng sửa và lưu trực tiếp trên file này.
+        File JSON tải về giữ nguyên trong Downloads; người dùng kiểm tra và lưu
+        trực tiếp bằng JSON editor của phần mềm.
         """
         self.current_working_file = result
         self._update_current_file_labels(
-            note="Trợ lý đã bóc tách dữ liệu xong. Đang mở file để bạn kiểm tra..."
+            note="Trợ lý đã bóc tách dữ liệu xong. Đang mở màn hình kiểm tra JSON..."
         )
         self.set_overall_status(
             "READY_FOR_REVIEW",
-            "Trợ lý đã bóc tách dữ liệu xong. Đang mở file để bạn kiểm tra...",
+            "Trợ lý đã bóc tách dữ liệu xong. Đang mở màn hình kiểm tra JSON...",
         )
         self.refresh_history()
         self.append_log(f"File mới sẵn sàng: {result.get('file_name')}")
-        self._auto_open_file()
+        self._open_extract_editor(auto=True)
 
     def on_file_error(self, message: str) -> None:
         """Nhận tín hiệu lỗi từ watcher (không dùng hộp thoại chặn)."""
@@ -1148,50 +1147,52 @@ class MainWindow(QMainWindow):
             )
             self._update_button_states()
             return
-        try:
-            file_utils.open_file(path)
-            self._update_record_status(
-                "OPENED_FOR_REVIEW",
-                note="Đã mở file bóc tách để xem/chỉnh sửa.",
-            )
-            self.set_overall_status(
-                "OPENED_FOR_REVIEW",
-                "Đang mở file bóc tách. Sửa xong hãy lưu (Ctrl+S) và đóng file.",
-            )
-            self.logger.info("Đã mở file bóc tách: %s", path)
-            self.append_log(f"Đã mở file bóc tách: {os.path.basename(path)}")
-        except Exception as exc:  # noqa: BLE001
-            self.logger.exception("Không mở được file bóc tách.")
-            self.show_error("Lỗi mở file", f"Không mở được file.\nChi tiết: {exc}")
+        self._open_extract_editor(auto=False)
 
-    def _auto_open_file(self) -> None:
-        """Tự mở file bóc tách bằng Excel ngay khi tải về."""
+    def _open_extract_editor(self, auto: bool = False) -> None:
+        """Mở UI kiểm tra/sửa file bóc tách JSON."""
         cw = self.current_working_file
         if not cw:
             return
         path = cw.get("working_path") or ""
         try:
-            file_utils.open_file(path)
-            self._update_record_status(
-                "OPENED_FOR_REVIEW",
-                note="Đã tự động mở file bóc tách để kiểm tra.",
-            )
-            self.set_overall_status(
-                "OPENED_FOR_REVIEW",
-                "Đã mở file bóc tách. Kiểm tra, chỉnh sửa xong hãy lưu và đóng file, "
-                "rồi bấm “Nhập lên file hàng ngày”.",
-            )
-            self.logger.info("Đã tự mở file bóc tách: %s", path)
-            self.append_log(f"Đã tự mở file bóc tách: {os.path.basename(path)}")
+            dialog = JsonExtractDialog(path, self)
+            dialog.exec()
+            if dialog.saved:
+                cw["file_size"] = os.path.getsize(path)
+                cw["file_hash"] = file_utils.sha256_file(path)
+                self._update_record_status(
+                    "REVIEW_SAVED",
+                    note="Đã lưu dữ liệu bóc tách JSON sau khi kiểm tra.",
+                    mark_reviewed=True,
+                )
+                status = "REVIEW_SAVED"
+                message = (
+                    "Đã lưu dữ liệu bóc tách JSON. Có thể bấm “Nhập lên file hàng ngày”."
+                )
+            else:
+                self._update_record_status(
+                    "OPENED_FOR_REVIEW",
+                    note="Đã mở dữ liệu bóc tách JSON để kiểm tra.",
+                )
+                status = "OPENED_FOR_REVIEW"
+                message = (
+                    "Đã mở dữ liệu bóc tách JSON. Kiểm tra, bấm “Lưu” nếu có chỉnh sửa, "
+                    "rồi bấm “Nhập lên file hàng ngày”."
+                )
+            self.set_overall_status(status, message)
+            action = "Tự mở" if auto else "Mở"
+            self.logger.info("%s dữ liệu bóc tách JSON: %s", action, path)
+            self.append_log(f"{action} dữ liệu bóc tách JSON: {os.path.basename(path)}")
         except Exception as exc:  # noqa: BLE001
-            self.logger.exception("Không tự mở được file bóc tách.")
+            self.logger.exception("Không mở được dữ liệu bóc tách JSON.")
             self.lbl_file_note.setText(
-                "Không tự mở được file. Hãy bấm “Xem file bóc tách dữ liệu” để mở "
-                f"thủ công. Chi tiết: {exc}"
+                "Không mở được dữ liệu bóc tách JSON. Hãy kiểm tra lại file tải về. "
+                f"Chi tiết: {exc}"
             )
             self.set_overall_status(
                 "READY_FOR_REVIEW",
-                "Không tự mở được file. Hãy bấm “Xem file bóc tách dữ liệu”.",
+                "Không mở được dữ liệu bóc tách JSON.",
             )
 
     # ================================================================== #
@@ -1270,16 +1271,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # Excel chỉ ghi nội dung mới xuống đĩa khi file được lưu và đóng; nếu
-        # còn mở thì bản đọc được có thể là bản cũ.
         try:
-            if file_utils.is_file_locked(source_path):
-                self.show_warning(
-                    "File bóc tách đang mở",
-                    "File bóc tách vẫn đang mở trong Excel. Hãy lưu (Ctrl+S), đóng "
-                    "file rồi bấm lại để phần mềm lấy đúng bản mới nhất.",
-                )
-                return
             if file_utils.is_file_locked(daily_path):
                 self.show_warning(
                     "File theo dõi đang mở",
@@ -1290,7 +1282,7 @@ class MainWindow(QMainWindow):
         except FileNotFoundError:
             self.show_error(
                 "File không tồn tại",
-                "File bóc tách hoặc file theo dõi không còn trên ổ đĩa.",
+                "File theo dõi không còn trên ổ đĩa.",
             )
             self._update_button_states()
             return
@@ -1334,25 +1326,31 @@ class MainWindow(QMainWindow):
     def _on_daily_analysis_ready(self, analysis: ImportAnalysis) -> None:
         if analysis.bill_choices:
             self.progress_daily.setVisible(False)
-            self.lbl_daily_status.setText("Cần chọn Bill phù hợp cho một số container.")
+            self.lbl_daily_status.setText("Cần chọn Bill hoặc dòng quyết toán phù hợp.")
             dialog = BillSelectionDialog(analysis.bill_choices, self)
             if dialog.exec() != QDialog.Accepted:
                 self._set_daily_running(False, "Đã hủy lần nhập; chưa có dữ liệu nào được ghi.")
                 return
             decisions = dialog.decisions()
             for request in analysis.bill_choices:
-                selected = decisions.get(request.subject_key)
-                if selected and selected not in ("__SKIP__", "__IGNORE__"):
+                for decision_key in (request.target_subject_key,):
+                    selected = decisions.get(decision_key)
+                    if selected and selected not in ("__SKIP__", "__IGNORE__", "__NO_BILL__"):
+                        self.database.save_match_decision(
+                            decision_key, request.container, selected
+                        )
+                selected_bill = decisions.get(request.subject_key)
+                if selected_bill and selected_bill not in ("__SKIP__", "__IGNORE__", "__NO_BILL__"):
                     self.database.save_match_decision(
-                        request.subject_key, request.container, selected
+                        request.subject_key, request.container, selected_bill
                     )
                     self.database.save_match_decision(
                         f"container:{request.container}:{request.close_date or ''}",
                         request.container,
-                        selected,
+                        selected_bill,
                     )
             self.progress_daily.setVisible(True)
-            self.lbl_daily_status.setText("Đang áp dụng lựa chọn Bill...")
+            self.lbl_daily_status.setText("Đang áp dụng lựa chọn match...")
             self._start_daily_worker(
                 lambda: self.daily_import_service.analyze(
                     analysis.output_path,

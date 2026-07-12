@@ -1,14 +1,14 @@
 # Trợ Lý Quyết Toán RPA
 
 Phần mềm desktop Windows điều phối luồng làm việc giữa **GPT Custom**, **file
-Excel bóc tách**, **file theo dõi hàng ngày** và **phần mềm quyết toán**.
+JSON bóc tách**, **file theo dõi hàng ngày** và **phần mềm quyết toán**.
 
 Luồng gồm 4 bước, mỗi bước đúng **một nút bấm**:
 
 1. **Mở trợ lý quyết toán** — chạy file `.bat` mở GPT Custom để bóc tách chứng từ.
-2. **Xem file bóc tách dữ liệu** — file tải về được **tự mở trong Excel**; nút này
-   mở lại file bất cứ lúc nào, kèm dòng **“Lưu lần cuối”** hiển thị đúng thời điểm
-   bạn bấm Lưu.
+2. **Xem file bóc tách dữ liệu** — file JSON tải về được mở bằng màn hình kiểm
+   tra/sửa dữ liệu của phần mềm; nút này mở lại dữ liệu bất cứ lúc nào, kèm dòng
+   **“Lưu lần cuối”** hiển thị đúng thời điểm bạn bấm **Lưu**.
 3. **Nhập lên file hàng ngày** — lấy **bản lưu mới nhất** của file bóc tách và cập
    nhật file theo dõi hàng ngày.
 4. **Nhập dữ liệu mới lên phần mềm quyết toán** — chạy file `.bat` khởi động luồng
@@ -71,12 +71,11 @@ File cấu hình mặc định nằm ở `D:\RPA_QuyetToan\Config\settings.json`
   "download_folder": "D:\\RPA_QuyetToan\\Downloads",
   "output_folder": "D:\\RPA_QuyetToan\\Outputs",
   "daily_tracking_file": "D:\\RPA_QuyetToan\\Daily\\file_theo_doi_hang_ngay.xlsx",
-  "allowed_extensions": [".xlsx", ".xlsm", ".csv"],
+  "allowed_extensions": [".json"],
   "output_file_patterns": [
-    "input_quyet_toan*.xlsx",
-    "output*.xlsx",
-    "input_trip*.xlsx",
-    "*.xlsx"
+    "boc_tach*.json",
+    "rpa_input*.json",
+    "*.json"
   ],
   "download_stable_seconds": 3
 }
@@ -121,17 +120,15 @@ rồi bấm **Lưu cấu hình**.
 Mọi thao tác hằng ngày nằm ở tab **Chức năng**, theo 4 bước, mỗi bước một nút:
 
 1. **Bước 1 — Mở trợ lý quyết toán.** Bấm nút (chạy file `.bat`), gửi chứng từ
-   lên **GPT Custom** và chờ bóc tách xong, rồi **tải file Excel về**
+   lên **GPT Custom** và chờ bóc tách xong, rồi **tải file JSON về**
    (Chrome lưu vào `Downloads`).
 2. **Bước 2 — Xem file bóc tách dữ liệu.** Phần mềm tự phát hiện file mới và
-   **tự mở trong Excel**. Kiểm tra/chỉnh sửa dữ liệu rồi **lưu (Ctrl+S) và đóng
-   file**. Bấm nút này để mở lại file bất cứ lúc nào; dòng **“Lưu lần cuối”**
-   ngay dưới nút cho biết bản hiện tại được lưu lúc nào.
+   mở màn hình kiểm tra dữ liệu JSON. Kiểm tra/chỉnh sửa dữ liệu rồi bấm **Lưu**.
+   Bấm nút này để mở lại dữ liệu bất cứ lúc nào; dòng **“Lưu lần cuối”** ngay
+   dưới nút cho biết bản hiện tại được lưu lúc nào.
 3. **Bước 3 — Nhập lên file hàng ngày.** Phần mềm lấy **bản lưu mới nhất** của
    file bóc tách, tự ghép Phiếu cân với Bill theo container, tạo/cập nhật SQT PM
    và ghép khoản chi theo Ngày tháng + Container.
-   - Hãy **đóng file bóc tách trong Excel** trước khi bấm, nếu không phần mềm sẽ
-     nhắc (file đang mở thì bản trên đĩa có thể chưa phải bản mới nhất).
    - Trước khi nhập, một bản sao của dữ liệu đang dùng được lưu vào
      `Outputs\YYYY-MM-DD\` để đối chiếu về sau.
    - Nếu một container có nhiều Bill, phần mềm yêu cầu chọn Bill đúng.
@@ -192,8 +189,8 @@ File `.exe` sẽ nằm trong thư mục `dist\QuyetToanAssistant\`.
 
 ## 11. Ghi chú vận hành
 
-- File bóc tách **giữ nguyên trong Downloads**; phần mềm **không tự xóa/di chuyển**
-  file này. Bạn sửa và lưu trực tiếp trên nó.
+- File JSON bóc tách **giữ nguyên trong Downloads**; phần mềm **không tự xóa/di chuyển**
+  file này. Bạn sửa và lưu trực tiếp bằng màn hình kiểm tra dữ liệu của phần mềm.
 - Mỗi lần bấm **Nhập lên file hàng ngày**, một bản sao của dữ liệu đang dùng được
   lưu vào `Outputs\YYYY-MM-DD\` (đặt tên theo mốc thời gian) để đối chiếu về sau.
 - Dùng giờ local của Windows (không dùng UTC).

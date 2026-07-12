@@ -180,7 +180,7 @@ def copy_download_to_output(download_path: str, output_folder: str) -> str:
     - Giữ nguyên file gốc trong Downloads; chỉ tạo thêm một bản trong Output.
     - Bản Output lưu vào ``output_folder\\YYYY-MM-DD\\``.
     - Tên bản Output: quyet_toan_output_YYYYMMDD_HHMMSS<ext> (không ghi đè).
-    - Giữ nguyên phần mở rộng gốc (ví dụ .csv, .xlsm).
+    - Giữ nguyên phần mở rộng gốc (ví dụ .json).
 
     Trả về đường dẫn bản Output vừa tạo.
     """
@@ -190,7 +190,7 @@ def copy_download_to_output(download_path: str, output_folder: str) -> str:
     now = datetime.now()
     date_dir = now.strftime("%Y-%m-%d")
     timestamp = now.strftime("%Y%m%d_%H%M%S")
-    ext = os.path.splitext(download_path)[1].lower() or ".xlsx"
+    ext = os.path.splitext(download_path)[1].lower() or ".json"
 
     output_day = os.path.join(output_folder, date_dir)
     os.makedirs(output_day, exist_ok=True)
@@ -239,7 +239,7 @@ def last_saved_text(path: str) -> str:
     """Trả về thời điểm lưu gần nhất của file dạng 'HH:MM ngày dd/mm/yyyy'.
 
     Lấy từ mtime của file chứ không lưu trong database, vì người dùng bấm Lưu
-    trong Excel (bên ngoài phần mềm) nên mtime là nguồn duy nhất luôn đúng.
+    trong JSON editor nên mtime là nguồn duy nhất luôn đúng.
     Trả về chuỗi rỗng nếu file không còn tồn tại.
     """
     try:

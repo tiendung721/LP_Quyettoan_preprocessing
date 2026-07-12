@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
@@ -66,27 +67,274 @@ class FunctionWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class JsonExtractDialog(QDialog):
+    """Dialog kiểm tra/sửa dữ liệu bóc tách JSON trước khi nhập file theo dõi."""
+
+    FIELDS = [
+        ("stt_hien_thi", "STT hiển thị"),
+        ("file_nguon", "File nguồn"),
+        ("ma_md5_file", "Mã MD5 file"),
+        ("loai_chung_tu", "Loại chứng từ"),
+        ("trang_thai", "Trạng thái"),
+        ("ngay_dong", "Ngày Đóng"),
+        ("so_container", "Số Container"),
+        ("bien_so_xe", "Biển số xe"),
+        ("so_tan", "Số tấn"),
+        ("loai_hang", "Loại hàng"),
+        ("noi_dong", "Nơi đóng"),
+        ("nguoi_nhan", "Người nhận"),
+        ("ten_tau", "Tên tàu"),
+        ("ngay_chay", "Ngày chạy"),
+        ("vt_bien", "VT biển"),
+        ("gia_vat_lieu", "Giá vật liệu"),
+        ("so_hd", "Số HĐ"),
+        ("so_bill", "Số Bill"),
+        ("so_chi_seal", "Số chì/Seal"),
+        ("don_gia", "Đơn giá"),
+        ("thanh_tien", "Thành tiền"),
+        ("vat", "VAT"),
+        ("tong_tien", "Tổng tiền"),
+        ("truong_khac", "Trường khác"),
+        ("do_tin_cay", "Độ tin cậy"),
+        ("canh_bao", "Cảnh báo"),
+    ]
+    INT_FIELDS = {"stt_hien_thi"}
+    NUMBER_FIELDS = {
+        "so_tan",
+        "gia_vat_lieu",
+        "don_gia",
+        "thanh_tien",
+        "vat",
+        "tong_tien",
+    }
+    STRUCTURED_DEFAULTS = {"truong_khac": {}, "canh_bao": []}
+
+    def __init__(self, path: str, parent=None):
+        super().__init__(parent)
+        self.path = path
+        self.payload: Dict[str, Any] = {}
+        self.rows: List[Dict[str, Any]] = []
+        self.current_index = -1
+        self.saved = False
+        self._dirty = False
+        self._loading = False
+
+        self._load_file()
+
+        self.setWindowTitle("Kiểm tra dữ liệu bóc tách")
+        self.resize(860, 640)
+        self.setMinimumSize(680, 460)
+
+        layout = QVBoxLayout(self)
+
+        title = QLabel(path)
+        title.setObjectName("metaText")
+        title.setWordWrap(True)
+        title.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(title)
+
+        row_picker = QHBoxLayout()
+        row_picker.addWidget(QLabel("Dòng dữ liệu:"))
+        self.row_combo = QComboBox()
+        self.row_combo.currentIndexChanged.connect(self._on_row_changed)
+        row_picker.addWidget(self.row_combo, stretch=1)
+        layout.addLayout(row_picker)
+
+        self.table = QTableWidget(0, 2)
+        self.table.setHorizontalHeaderLabels(["Tên trường", "Dữ liệu"])
+        self.table.setAlternatingRowColors(True)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        self.table.itemChanged.connect(lambda _item: self._mark_dirty())
+        layout.addWidget(self.table, stretch=1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Close)
+        buttons.button(QDialogButtonBox.Save).setText("Lưu")
+        buttons.button(QDialogButtonBox.Close).setText("Đóng")
+        buttons.button(QDialogButtonBox.Save).clicked.connect(self.save)
+        buttons.rejected.connect(self.accept)
+        layout.addWidget(buttons)
+
+        self._populate_rows()
+
+    def _load_file(self) -> None:
+        try:
+            with open(self.path, "r", encoding="utf-8-sig") as f:
+                payload = json.load(f)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"File JSON không hợp lệ: {exc}") from exc
+        except UnicodeDecodeError as exc:
+            raise ValueError("File JSON không đọc được bằng UTF-8.") from exc
+        except OSError as exc:
+            raise ValueError(f"Không đọc được file JSON: {exc}") from exc
+
+        if not isinstance(payload, dict):
+            raise ValueError("File JSON phải có object gốc.")
+        rows = payload.get("du_lieu_boc_tach")
+        if not isinstance(rows, list):
+            raise ValueError("File JSON thiếu mảng 'du_lieu_boc_tach'.")
+        if any(not isinstance(row, dict) for row in rows):
+            raise ValueError("Mỗi dòng trong 'du_lieu_boc_tach' phải là object JSON.")
+
+        self.payload = payload
+        self.rows = [dict(row) for row in rows]
+
+    def _populate_rows(self) -> None:
+        self._loading = True
+        self.row_combo.clear()
+        for index, row in enumerate(self.rows, start=1):
+            self.row_combo.addItem(self._row_label(index, row), index - 1)
+        self.row_combo.setEnabled(bool(self.rows))
+        self._loading = False
+        if self.rows:
+            self.current_index = 0
+            self._load_row(0)
+        else:
+            self.current_index = -1
+            self.table.setRowCount(0)
+
+    @staticmethod
+    def _row_label(index: int, row: Dict[str, Any]) -> str:
+        parts = [
+            str(row.get("loai_chung_tu") or "Chứng từ"),
+            str(row.get("so_container") or "").strip(),
+            str(row.get("file_nguon") or "").strip(),
+        ]
+        suffix = " | ".join(part for part in parts if part)
+        return f"{index}. {suffix}" if suffix else f"{index}. Dòng bóc tách"
+
+    def _load_row(self, row_index: int) -> None:
+        self._loading = True
+        row = self.rows[row_index]
+        self.table.setRowCount(len(self.FIELDS))
+        for table_row, (key, label) in enumerate(self.FIELDS):
+            name_item = QTableWidgetItem(label)
+            name_item.setData(Qt.UserRole, key)
+            name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+            value_item = QTableWidgetItem(self._display_value(row.get(key)))
+            self.table.setItem(table_row, 0, name_item)
+            self.table.setItem(table_row, 1, value_item)
+        self._loading = False
+        self._dirty = False
+
+    @staticmethod
+    def _display_value(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False, indent=2)
+        return str(value)
+
+    def _on_row_changed(self, index: int) -> None:
+        if self._loading or index < 0:
+            return
+        target = int(self.row_combo.itemData(index))
+        previous = self.current_index
+        if previous >= 0 and not self._store_current_row():
+            self.row_combo.blockSignals(True)
+            self.row_combo.setCurrentIndex(previous)
+            self.row_combo.blockSignals(False)
+            return
+        self.current_index = target
+        self._load_row(target)
+
+    def _store_current_row(self) -> bool:
+        if self.current_index < 0 or self.current_index >= len(self.rows):
+            return True
+        updated = dict(self.rows[self.current_index])
+        try:
+            for table_row in range(self.table.rowCount()):
+                name_item = self.table.item(table_row, 0)
+                value_item = self.table.item(table_row, 1)
+                if name_item is None:
+                    continue
+                key = str(name_item.data(Qt.UserRole) or "")
+                text = value_item.text() if value_item else ""
+                updated[key] = self._parse_value(key, text)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Dữ liệu chưa hợp lệ", str(exc))
+            return False
+        self.rows[self.current_index] = updated
+        return True
+
+    def _parse_value(self, key: str, text: str) -> Any:
+        value = text.strip()
+        if key in self.STRUCTURED_DEFAULTS:
+            if not value:
+                default = self.STRUCTURED_DEFAULTS[key]
+                return list(default) if isinstance(default, list) else dict(default)
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError as exc:
+                label = dict(self.FIELDS).get(key, key)
+                raise ValueError(f"Trường '{label}' phải là JSON hợp lệ: {exc}") from exc
+        if not value:
+            return None
+        if key in self.INT_FIELDS:
+            parsed = parse_number(value)
+            if parsed is None or int(parsed) != parsed:
+                label = dict(self.FIELDS).get(key, key)
+                raise ValueError(f"Trường '{label}' phải là số nguyên.")
+            return int(parsed)
+        if key in self.NUMBER_FIELDS:
+            parsed = parse_number(value)
+            if parsed is None:
+                label = dict(self.FIELDS).get(key, key)
+                raise ValueError(f"Trường '{label}' phải là số.")
+            return parsed
+        return value
+
+    def _mark_dirty(self) -> None:
+        if not self._loading:
+            self._dirty = True
+
+    @Slot()
+    def save(self) -> None:
+        if not self._store_current_row():
+            return
+        self.payload["du_lieu_boc_tach"] = self.rows
+        try:
+            with open(self.path, "w", encoding="utf-8") as f:
+                json.dump(self.payload, f, ensure_ascii=False, indent=2)
+                f.write("\n")
+        except OSError as exc:
+            QMessageBox.critical(self, "Không lưu được JSON", str(exc))
+            return
+        self.saved = True
+        self._dirty = False
+        QMessageBox.information(self, "Đã lưu", "Đã lưu dữ liệu bóc tách JSON.")
+
+
 class BillSelectionDialog(QDialog):
-    """Một popup xử lý toàn bộ container có nhiều Bill trong một lượt."""
+    """Popup chọn Bill và/hoặc dòng quyết toán khi dữ liệu bị mơ hồ."""
 
     def __init__(self, requests: List[BillChoiceRequest], parent=None):
         super().__init__(parent)
         self.requests = requests
         self.combos: Dict[str, QComboBox] = {}
-        self.setWindowTitle("Chọn Bill phù hợp")
-        self.resize(980, 420)
+        self.target_combos: Dict[str, QComboBox] = {}
+        self.setWindowTitle("Chọn dữ liệu phù hợp")
+        self.resize(1180, 460)
 
         layout = QVBoxLayout(self)
         hint = QLabel(
-            "Một số container xuất hiện trên nhiều Bill. Hãy chọn Bill đúng; "
-            "nếu chưa chắc, chọn “Để xử lý sau”."
+            "Một số container khớp nhiều Bill hoặc nhiều dòng quyết toán. "
+            "Hãy chọn Bill và SQT đúng; nếu chưa chắc, chọn “Để xử lý sau”."
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
-        table = QTableWidget(len(requests), 5)
+        table = QTableWidget(len(requests), 6)
         table.setHorizontalHeaderLabels(
-            ["Container", "Ngày đóng", "Số tấn", "Loại hàng", "Bill được chọn"]
+            [
+                "Container",
+                "Ngày đóng",
+                "Số tấn",
+                "Loại hàng",
+                "Bill được chọn",
+                "Dòng quyết toán",
+            ]
         )
         table.setAlternatingRowColors(True)
         table.setSelectionMode(QTableWidget.NoSelection)
@@ -101,30 +349,58 @@ class BillSelectionDialog(QDialog):
             )
             table.setItem(row_index, 3, QTableWidgetItem(request.cargo))
             combo = QComboBox()
-            combo.addItem("Để xử lý sau", "__SKIP__")
-            combo.addItem("Bỏ qua container này", "__IGNORE__")
-            for candidate in request.candidates:
-                label = " | ".join(
-                    part
-                    for part in (
-                        candidate.bill_no or "Không có số Bill",
-                        candidate.vessel,
-                        _display_date(candidate.sail_date),
-                        candidate.carrier,
+            if request.candidates:
+                if len(request.candidates) > 1:
+                    combo.addItem("Để xử lý sau", "__SKIP__")
+                    combo.addItem("Bỏ qua container này", "__IGNORE__")
+                for candidate in request.candidates:
+                    label = " | ".join(
+                        part
+                        for part in (
+                            candidate.bill_no or "Không có số Bill",
+                            candidate.vessel,
+                            _display_date(candidate.sail_date),
+                            candidate.carrier,
+                        )
+                        if part
                     )
-                    if part
-                )
-                combo.addItem(label, candidate.md5)
-                combo.setItemData(
-                    combo.count() - 1,
-                    f"File: {candidate.source_name}\nMD5: {candidate.md5}\n"
-                    f"Seal: {candidate.seal or '—'}",
-                    Qt.ToolTipRole,
-                )
-            if len(request.candidates) == 1:
-                combo.setCurrentIndex(2)
+                    combo.addItem(label, candidate.md5)
+                    combo.setItemData(
+                        combo.count() - 1,
+                        f"File: {candidate.source_name}\nMD5: {candidate.md5 or '—'}\n"
+                        f"Seal: {candidate.seal or '—'}",
+                        Qt.ToolTipRole,
+                    )
+            else:
+                combo.addItem("Không có Bill để chọn", "__NO_BILL__")
+                combo.setEnabled(False)
             table.setCellWidget(row_index, 4, combo)
             self.combos[request.subject_key] = combo
+
+            target_combo = QComboBox()
+            if request.target_candidates:
+                if len(request.target_candidates) > 1:
+                    target_combo.addItem("Để xử lý sau", "__SKIP__")
+                for candidate in request.target_candidates:
+                    label = " | ".join(
+                        part
+                        for part in (
+                            f"SQT {candidate.sqt}",
+                            f"Dòng {candidate.row_number}" if candidate.row_number else "",
+                            _display_date(candidate.close_date),
+                            candidate.cargo,
+                            candidate.vessel,
+                        )
+                        if part
+                    )
+                    target_combo.addItem(label, f"sqt:{candidate.sqt}")
+                if request.allow_new_target:
+                    target_combo.addItem("Tạo dòng quyết toán mới", "__NEW__")
+            else:
+                target_combo.addItem("Tạo dòng quyết toán mới", "__NEW__")
+                target_combo.setEnabled(False)
+            table.setCellWidget(row_index, 5, target_combo)
+            self.target_combos[request.target_subject_key] = target_combo
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(table)
@@ -140,10 +416,17 @@ class BillSelectionDialog(QDialog):
         layout.addWidget(buttons)
 
     def decisions(self) -> Dict[str, str]:
-        return {
+        result = {
             key: str(combo.currentData() or "__SKIP__")
             for key, combo in self.combos.items()
         }
+        result.update(
+            {
+                key: str(combo.currentData() or "__SKIP__")
+                for key, combo in self.target_combos.items()
+            }
+        )
+        return result
 
 
 class ConflictDialog(QDialog):

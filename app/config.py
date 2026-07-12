@@ -61,12 +61,11 @@ def get_default_settings(app_root: str = DEFAULT_APP_ROOT) -> Dict[str, Any]:
         "daily_tracking_file": os.path.join(
             app_root, "Daily", "file_theo_doi_hang_ngay.xlsx"
         ),
-        "allowed_extensions": [".xlsx", ".xlsm", ".csv"],
+        "allowed_extensions": [".json"],
         "output_file_patterns": [
-            "input_quyet_toan*.xlsx",
-            "output*.xlsx",
-            "input_trip*.xlsx",
-            "*.xlsx",
+            "boc_tach*.json",
+            "rpa_input*.json",
+            "*.json",
         ],
         "download_stable_seconds": 3,
         "cargo_name_mappings": {
@@ -103,6 +102,10 @@ class AppConfig:
                 data = {}
             # Bổ sung các khóa còn thiếu bằng giá trị mặc định.
             merged = {**defaults, **(data or {})}
+            # Luồng mới chỉ nhận file bóc tách JSON, kể cả khi settings cũ còn
+            # lưu cấu hình Excel từ phiên bản trước.
+            merged["allowed_extensions"] = defaults["allowed_extensions"]
+            merged["output_file_patterns"] = defaults["output_file_patterns"]
             config = cls(merged, config_path)
         else:
             config = cls(defaults, config_path)
