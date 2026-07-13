@@ -1,8 +1,8 @@
-"""Theo dõi thư mục Downloads bằng watchdog.
+"""Theo dõi thư mục output bằng watchdog.
 
 Khi phát hiện file output hợp lệ, xử lý trong luồng riêng (không block UI):
-chờ file tải xong -> giữ nguyên trong Downloads -> ghi database -> phát tín hiệu
-(signal) về MainWindow. Chỉ sao chép sang Outputs sau khi người dùng xác nhận.
+chờ file ổn định -> giữ nguyên trong output -> ghi database -> phát tín hiệu
+(signal) về MainWindow.
 """
 
 from __future__ import annotations
@@ -32,8 +32,8 @@ class WatcherSignals(QObject):
     log_message = Signal(str)     # dòng log để hiển thị trên UI
 
 
-class _DownloadEventHandler(FileSystemEventHandler):
-    def __init__(self, watcher: "DownloadWatcher"):
+class _OutputEventHandler(FileSystemEventHandler):
+    def __init__(self, watcher: "OutputWatcher"):
         super().__init__()
         self.watcher = watcher
 
@@ -56,7 +56,7 @@ class _DownloadEventHandler(FileSystemEventHandler):
             self.watcher.forget(event.src_path)
 
 
-class DownloadWatcher:
+class OutputWatcher:
     def __init__(self, config: "AppConfig", database: "Database", logger: "logging.Logger"):
         self.config = config
         self.database = database
@@ -66,21 +66,21 @@ class DownloadWatcher:
         self._observer = None
         self._processing = set()
         # Các file đã ghi nhận trong phiên này -> bỏ qua sự kiện sửa file sau đó
-        # (khi người dùng chỉnh & lưu file ngay trong thư mục Downloads).
+        # (khi người dùng chỉnh & lưu file ngay trong thư mục output).
         self._handled_paths = set()
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ #
     def start(self) -> None:
-        """Bắt đầu theo dõi thư mục download."""
-        folder = self.config.download_folder
+        """Bắt đầu theo dõi thư mục output."""
+        folder = self.config.output_folder
         os.makedirs(folder, exist_ok=True)
 
         self._observer = Observer()
-        self._observer.schedule(_DownloadEventHandler(self), folder, recursive=False)
+        self._observer.schedule(_OutputEventHandler(self), folder, recursive=False)
         self._observer.start()
 
-        msg = f"Bắt đầu theo dõi thư mục tải về: {folder}"
+        msg = f"Bắt đầu theo dõi thư mục output: {folder}"
         self.logger.info(msg)
         self.signals.log_message.emit(msg)
 
@@ -93,13 +93,13 @@ class DownloadWatcher:
             except Exception:  # noqa: BLE001 - không để việc dừng gây crash
                 pass
             self._observer = None
-            self.logger.info("Đã dừng theo dõi thư mục tải về.")
+            self.logger.info("Đã dừng theo dõi thư mục output.")
 
     # ------------------------------------------------------------------ #
     def mark_handled(self, path: str) -> None:
         """Đánh dấu một file đã được tiếp nhận từ trước (khôi phục khi mở app).
 
-        Nhờ vậy khi người dùng chỉnh và lưu chính file đó trong thư mục tải về,
+        Nhờ vậy khi người dùng chỉnh và lưu chính file đó trong thư mục output,
         watcher không coi đây là file mới (tránh ghi bản ghi trùng và tự mở lại
         file đang được chỉnh).
         """
@@ -110,9 +110,9 @@ class DownloadWatcher:
 
     # ------------------------------------------------------------------ #
     def forget(self, path: str) -> None:
-        """Quên một file đã bị xóa khỏi thư mục tải về.
+        """Quên một file đã bị xóa khỏi thư mục output.
 
-        Nhờ vậy nếu người dùng xóa file cũ rồi tải về file mới trùng tên, phần
+        Nhờ vậy nếu người dùng xóa file cũ rồi lưu file mới trùng tên, phần
         mềm vẫn nhận đó là file mới thay vì bỏ qua.
         """
         with self._lock:
@@ -122,8 +122,8 @@ class DownloadWatcher:
     def handle_candidate(self, path: str) -> None:
         """Lọc nhanh và khởi động luồng xử lý cho một file ứng viên."""
         try:
-            # Bỏ qua file tạm khi đang tải.
-            if file_utils.is_temp_download_file(path):
+            # Bỏ qua file tạm khi file output chưa ghi xong.
+            if file_utils.is_temp_output_file(path):
                 return
             # Bỏ qua nếu không đúng đuôi / không khớp mẫu tên.
             if not file_utils.is_allowed_output_file(
@@ -154,25 +154,25 @@ class DownloadWatcher:
 
             stable = file_utils.wait_until_file_stable(
                 path,
-                stable_seconds=self.config.download_stable_seconds,
+                stable_seconds=self.config.file_stable_seconds,
                 timeout=60,
             )
             if not stable:
-                # File có thể đã bị di chuyển bởi lần xử lý khác, hoặc tải lỗi.
+                # File có thể đã bị di chuyển bởi lần xử lý khác, hoặc ghi lỗi.
                 if not os.path.exists(path):
                     return
                 warn = (
-                    f"File '{name}' tải chưa ổn định sau 60 giây, tạm bỏ qua. "
-                    "Vui lòng kiểm tra lại việc tải file."
+                    f"File '{name}' chưa ổn định sau 60 giây, tạm bỏ qua. "
+                    "Vui lòng kiểm tra lại file trong thư mục output."
                 )
                 self.logger.warning(warn)
                 self.signals.file_error.emit(warn)
                 return
 
-            self._emit_log(f"File đã tải xong (ổn định): {name}")
+            self._emit_log(f"File output đã ổn định: {name}")
 
-            # Giữ nguyên file trong Downloads, chỉ thu thập thông tin để ghi nhận.
-            result = file_utils.download_file_info(path)
+            # Giữ nguyên file trong output, chỉ thu thập thông tin để ghi nhận.
+            result = file_utils.output_file_info(path)
 
             record_id = self.database.insert_processed_file(
                 working_path=result["working_path"],
@@ -198,7 +198,7 @@ class DownloadWatcher:
             )
             self.signals.output_ready.emit(result)
         except Exception as exc:  # noqa: BLE001 - lỗi 1 file không được làm sập app
-            self.logger.exception("Lỗi khi xử lý file tải về: %s", path)
+            self.logger.exception("Lỗi khi xử lý file output: %s", path)
             self.signals.file_error.emit(
                 f"Không xử lý được file '{name}': {exc}"
             )

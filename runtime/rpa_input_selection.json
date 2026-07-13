@@ -1,0 +1,9 @@
+{
+  "operation": "NHAP_THONG_TIN",
+  "daily_file": "C:\\Users\\Admin\\Desktop\\test\\quyettoan_pm_project\\output\\quyet_toan_hang_ngay.xlsx",
+  "sheet_name": "Thong_Tin_Quyet_Toan",
+  "selected_sqt": [
+    "688",
+    "689"
+  ]
+}

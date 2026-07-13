@@ -56,12 +56,25 @@ from .daily_import_ui import (
     UnmatchedRowsDialog,
 )
 from .database import Database
-from .watcher import DownloadWatcher
+from .dialogs.select_sqt_dialog import SelectSqtDialog
+from .services.rpa_launcher import RpaLaunchError, launch_bat, validate_bat_path
+from .services.sqt_selection_service import (
+    DailyFileLockedError,
+    DailyFileNotFoundError,
+    EmptySqtListError,
+    MissingColumnError,
+    MissingSheetError,
+    SelectionJsonWriteError,
+    SqtSelectionError,
+    read_sqt_items,
+    write_selection_json,
+)
+from .watcher import OutputWatcher
 
 # Nhãn tiếng Việt cho từng trạng thái (không kèm mã kỹ thuật cho dễ hiểu).
 STATUS_LABELS = {
-    "WAITING_FOR_DOWNLOAD": "Đang chờ tải file output",
-    "DOWNLOADED": "Đã tải về",
+    "WAITING_FOR_DOWNLOAD": "Đang chờ file output",
+    "DOWNLOADED": "Đã nhận file output",
     "READY_FOR_REVIEW": "Sẵn sàng để kiểm tra",
     "OPENED_FOR_REVIEW": "Đang mở để kiểm tra",
     "REVIEW_SAVED": "Đã lưu sau khi chỉnh sửa",
@@ -133,6 +146,7 @@ class MainWindow(QMainWindow):
         self._daily_worker_error: Optional[str] = None
         self._daily_worker_callback = None
         self._rpa_cooldown = False
+        self._select_sqt_dialog_open = False
         self._rpa_launched_at: Optional[str] = None
         self._last_saved_shown = ""
 
@@ -143,8 +157,8 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._setup_log_bridge()
 
-        # Watcher theo dõi thư mục download.
-        self.watcher = DownloadWatcher(self.config, self.database, self.logger)
+        # Watcher theo dõi thư mục output.
+        self.watcher = OutputWatcher(self.config, self.database, self.logger)
         self.watcher.signals.output_ready.connect(self.on_output_ready)
         self.watcher.signals.file_error.connect(self.on_file_error)
         self.watcher.signals.log_message.connect(self.append_log)
@@ -382,13 +396,13 @@ class MainWindow(QMainWindow):
 
         # Bước 1 — mở trợ lý
         if has_file:
-            self._set_step(1, "Đã tải file về", "done")
+            self._set_step(1, "Đã có file output", "done")
         else:
             self._set_step(1, "Bắt đầu tại đây", "active")
 
         # Bước 2 — file bóc tách
         if not has_file:
-            self._set_step(2, "Chờ file tải về", "wait")
+            self._set_step(2, "Chờ file output", "wait")
         elif is_error:
             self._set_step(2, "Lỗi", "error")
         else:
@@ -558,24 +572,33 @@ class MainWindow(QMainWindow):
             "4", "Nhập lên phần mềm quyết toán"
         )
         guide4.addWidget(self._guide_label(
-            "Bấm nút để chạy luồng PAD RPA tự nhập dữ liệu mới lên phần mềm quyết "
-            "toán. Trong lúc RPA chạy, không dùng chuột/bàn phím và không mở phần "
-            "mềm quyết toán bằng tay."
+            "Tạo Số QT mới sẽ gọi riêng flow PAD tạo mới và không đọc Excel. Nhập thông tin sẽ đọc "
+            "sheet Thong_Tin_Quyet_Toan, cho chọn một hoặc nhiều SQT rồi ghi JSON tạm cho PAD."
         ))
         self.lbl_rpa_status = QLabel("Chưa chạy luồng RPA trong phiên này.")
         self.lbl_rpa_status.setObjectName("hintText")
         self.lbl_rpa_status.setWordWrap(True)
         body4.addWidget(self.lbl_rpa_status)
 
-        self.lbl_rpa_path = QLabel("")
-        self.lbl_rpa_path.setObjectName("metaText")
-        self.btn_run_rpa = self._make_button(
-            "Chạy RPA quyết toán",
-            self.on_run_rpa,
+        self.lbl_create_new_path = QLabel("")
+        self.lbl_create_new_path.setObjectName("metaText")
+        self.btn_create_new_sqt = self._make_button(
+            "Tạo 1 Số QT mới trên PM",
+            self.on_create_new_sqt,
             variant="success",
             action=True,
         )
-        body4.addLayout(self._action_row(self.btn_run_rpa, self.lbl_rpa_path))
+        body4.addLayout(self._action_row(self.btn_create_new_sqt, self.lbl_create_new_path))
+
+        self.lbl_input_information_path = QLabel("")
+        self.lbl_input_information_path.setObjectName("metaText")
+        self.btn_input_information = self._make_button(
+            "Nhập thông tin",
+            self.on_input_information,
+            variant="primary",
+            action=True,
+        )
+        body4.addLayout(self._action_row(self.btn_input_information, self.lbl_input_information_path))
         v.addWidget(self.card_step4)
 
         v.addStretch(1)
@@ -599,26 +622,38 @@ class MainWindow(QMainWindow):
         grid.setVerticalSpacing(10)
 
         self.edit_bat = QLineEdit(self.config.bat_path)
-        self.edit_rpa_bat = QLineEdit(self.config.pad_bat_path)
-        self.edit_download = QLineEdit(self.config.download_folder)
+        self.edit_create_new_bat = QLineEdit(self.config.pad_create_new_bat_path)
+        self.edit_input_information_bat = QLineEdit(
+            self.config.pad_input_information_bat_path
+        )
         self.edit_output = QLineEdit(self.config.output_folder)
         self.edit_daily = QLineEdit(self.config.daily_tracking_file)
+        self.edit_daily.setReadOnly(True)
 
         rows = [
             ("File .bat mở trợ lý:", self.edit_bat, self._browse_bat),
-            ("File .bat chạy RPA quyết toán:", self.edit_rpa_bat, self._browse_rpa_bat),
-            ("Thư mục download (file tải về):", self.edit_download, self._browse_download),
-            ("Thư mục output (bản đã nhập):", self.edit_output, self._browse_output),
-            ("File theo dõi hàng ngày:", self.edit_daily, self._browse_daily),
+            (
+                "File .bat tạo 1 Số QT mới:",
+                self.edit_create_new_bat,
+                self._browse_create_new_bat,
+            ),
+            (
+                "File .bat nhập thông tin:",
+                self.edit_input_information_bat,
+                self._browse_input_information_bat,
+            ),
+            ("Thư mục output:", self.edit_output, self._browse_output),
+            ("File theo dõi hàng ngày trong output:", self.edit_daily, None),
         ]
         for r, (label, edit, handler) in enumerate(rows):
             lbl = QLabel(label)
             lbl.setObjectName("formLabel")
             grid.addWidget(lbl, r, 0)
             grid.addWidget(edit, r, 1)
-            btn = self._make_button("Chọn…", handler)
-            btn.setFixedWidth(96)
-            grid.addWidget(btn, r, 2)
+            if handler is not None:
+                btn = self._make_button("Chọn…", handler)
+                btn.setFixedWidth(96)
+                grid.addWidget(btn, r, 2)
         grid.setColumnStretch(1, 1)
         cfg.layout().addLayout(grid)
 
@@ -686,7 +721,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self.logger.exception("Không khởi động được watcher.")
             self.show_error(
-                "Không theo dõi được thư mục download",
+                "Không theo dõi được thư mục output",
                 f"Chi tiết: {exc}",
             )
 
@@ -694,7 +729,7 @@ class MainWindow(QMainWindow):
         """Nạp lại file bóc tách đang dùng khi mở app.
 
         Ưu tiên bản ghi gần nhất trong database; nếu file đó không còn trên ổ
-        đĩa thì tự nhận file bóc tách mới nhất trong thư mục tải về (người dùng
+        đĩa thì tự nhận file bóc tách mới nhất trong thư mục output (người dùng
         không phải chọn tay).
         """
         try:
@@ -714,8 +749,8 @@ class MainWindow(QMainWindow):
             self.append_log(f"Khôi phục file gần nhất: {record.get('file_name')}")
             return
 
-        self.append_log("Chưa có file bóc tách nào đang mở dở. Đang tìm trong thư mục tải về...")
-        self._adopt_latest_download()
+        self.append_log("Chưa có file bóc tách nào đang mở dở. Đang tìm trong thư mục output...")
+        self._adopt_latest_output()
 
     def _apply_record(self, record: Dict[str, Any], note: Optional[str] = None) -> None:
         """Đưa một bản ghi database thành file bóc tách đang làm việc."""
@@ -735,10 +770,10 @@ class MainWindow(QMainWindow):
         self._mark_current_file_handled()
         self._update_current_file_labels(note=note)
 
-    def _adopt_latest_download(self) -> None:
-        """Tự nhận file bóc tách mới nhất trong thư mục tải về (nếu có)."""
+    def _adopt_latest_output(self) -> None:
+        """Tự nhận file bóc tách mới nhất trong thư mục output (nếu có)."""
         path = file_utils.find_latest_output_file(
-            self.config.download_folder,
+            self.config.output_folder,
             self.config.allowed_extensions,
             self.config.output_file_patterns,
         )
@@ -749,13 +784,13 @@ class MainWindow(QMainWindow):
         record = self.database.get_file_by_working_path(path)
         if record:
             self._apply_record(
-                record, note="Đã nhận lại file bóc tách gần nhất trong thư mục tải về."
+                record, note="Đã nhận lại file bóc tách gần nhất trong thư mục output."
             )
             self.append_log(f"Nhận lại file bóc tách: {os.path.basename(path)}")
             return
 
         try:
-            result = file_utils.download_file_info(path)
+            result = file_utils.output_file_info(path)
             record_id = self.database.insert_processed_file(
                 working_path=result["working_path"],
                 status="READY_FOR_REVIEW",
@@ -764,7 +799,7 @@ class MainWindow(QMainWindow):
                 file_name=result["file_name"],
                 file_size=result["file_size"],
                 file_hash=result["file_hash"],
-                note="Phần mềm tự nhận file bóc tách mới nhất trong thư mục tải về.",
+                note="Phần mềm tự nhận file bóc tách mới nhất trong thư mục output.",
             )
         except Exception:  # noqa: BLE001 - không có file cũng không được sập app
             self.logger.exception("Không tiếp nhận được file bóc tách: %s", path)
@@ -777,7 +812,7 @@ class MainWindow(QMainWindow):
         self.overall_status = "READY_FOR_REVIEW"
         self._mark_current_file_handled()
         self._update_current_file_labels(
-            note="Phần mềm tự nhận file bóc tách mới nhất trong thư mục tải về."
+            note="Phần mềm tự nhận file bóc tách mới nhất trong thư mục output."
         )
         self.refresh_history()
         self.logger.info("Tự nhận file bóc tách: %s", path)
@@ -786,7 +821,7 @@ class MainWindow(QMainWindow):
     def _mark_current_file_handled(self) -> None:
         """Báo watcher biết file đang dùng không phải file mới.
 
-        Người dùng chỉnh và lưu file ngay trong thư mục tải về, nên nếu không
+        Người dùng chỉnh và lưu file ngay trong thư mục output, nên nếu không
         đánh dấu thì watchdog sẽ coi mỗi lần lưu là một file mới: ghi thêm bản
         ghi trùng và tự mở lại file đang chỉnh.
         """
@@ -832,7 +867,10 @@ class MainWindow(QMainWindow):
         )
         # Bước 4 luôn dùng được (trừ vài giây chống bấm trùng); nếu chưa cấu
         # hình file .bat thì báo lỗi hướng dẫn ngay lúc bấm.
-        self.btn_run_rpa.setEnabled(not self._rpa_cooldown)
+        self.btn_create_new_sqt.setEnabled(not self._rpa_cooldown)
+        self.btn_input_information.setEnabled(
+            not self._rpa_cooldown and not self._select_sqt_dialog_open
+        )
 
         self._refresh_daily_labels()
         self._refresh_step_states()
@@ -847,13 +885,25 @@ class MainWindow(QMainWindow):
             self.lbl_daily_path.setText("Ghi vào: (chưa cấu hình file theo dõi)")
             self.lbl_daily_path.setToolTip("")
 
-        rpa_bat = self.config.pad_bat_path
-        if rpa_bat and os.path.isfile(rpa_bat):
-            self.lbl_rpa_path.setText("Chạy file: " + os.path.basename(rpa_bat))
-            self.lbl_rpa_path.setToolTip(rpa_bat)
+        create_bat = self.config.pad_create_new_bat_path
+        if create_bat and os.path.isfile(create_bat):
+            self.lbl_create_new_path.setText("Tạo mới: " + os.path.basename(create_bat))
+            self.lbl_create_new_path.setToolTip(create_bat)
         else:
-            self.lbl_rpa_path.setText("Chưa cấu hình file .bat (xem tab Cài đặt)")
-            self.lbl_rpa_path.setToolTip("")
+            self.lbl_create_new_path.setText("Chưa cấu hình BAT tạo mới (xem tab Cài đặt)")
+            self.lbl_create_new_path.setToolTip("")
+
+        input_bat = self.config.pad_input_information_bat_path
+        if input_bat and os.path.isfile(input_bat):
+            self.lbl_input_information_path.setText(
+                "Nhập thông tin: " + os.path.basename(input_bat)
+            )
+            self.lbl_input_information_path.setToolTip(input_bat)
+        else:
+            self.lbl_input_information_path.setText(
+                "Chưa cấu hình BAT nhập thông tin (xem tab Cài đặt)"
+            )
+            self.lbl_input_information_path.setToolTip("")
 
     def _refresh_saved_label(self) -> None:
         """Đồng bộ dòng “Lưu thành công lần cuối” với thời điểm lưu thật của file."""
@@ -952,53 +1002,60 @@ class MainWindow(QMainWindow):
             self.edit_bat.setText(os.path.normpath(path))
 
     def _browse_rpa_bat(self) -> None:
+        self._browse_input_information_bat()
+
+    def _browse_create_new_bat(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Chọn file .bat chạy RPA quyết toán",
-            self.edit_rpa_bat.text(),
+            "Chọn file .bat tạo 1 Số QT mới",
+            self.edit_create_new_bat.text(),
             "Batch (*.bat);;Tất cả (*.*)",
         )
         if path:
-            self.edit_rpa_bat.setText(os.path.normpath(path))
+            self.edit_create_new_bat.setText(os.path.normpath(path))
 
-    def _browse_download(self) -> None:
-        path = QFileDialog.getExistingDirectory(
-            self, "Chọn thư mục download", self.edit_download.text()
+    def _browse_input_information_bat(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Chọn file .bat nhập thông tin",
+            self.edit_input_information_bat.text(),
+            "Batch (*.bat);;Tất cả (*.*)",
         )
         if path:
-            self.edit_download.setText(os.path.normpath(path))
+            self.edit_input_information_bat.setText(os.path.normpath(path))
 
     def _browse_output(self) -> None:
         path = QFileDialog.getExistingDirectory(
             self, "Chọn thư mục output", self.edit_output.text()
         )
         if path:
-            self.edit_output.setText(os.path.normpath(path))
-
-    def _browse_daily(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Chọn file theo dõi hàng ngày",
-            self.edit_daily.text(),
-            "Excel (*.xlsx *.xlsm);;Tất cả (*.*)",
-        )
-        if path:
-            self.edit_daily.setText(os.path.normpath(path))
+            output_folder = os.path.normpath(path)
+            self.edit_output.setText(output_folder)
+            self.edit_daily.setText(
+                os.path.join(output_folder, os.path.basename(self.config.daily_tracking_file))
+            )
 
     def on_save_config(self) -> None:
         try:
             self.config.set("bat_path", self.edit_bat.text().strip())
-            self.config.set("pad_bat_path", self.edit_rpa_bat.text().strip())
-            self.config.set("download_folder", self.edit_download.text().strip())
-            self.config.set("output_folder", self.edit_output.text().strip())
-            self.config.set("daily_tracking_file", self.edit_daily.text().strip())
+            self.config.set(
+                "pad_create_new_bat_path",
+                self.edit_create_new_bat.text().strip(),
+            )
+            self.config.set(
+                "pad_input_information_bat_path",
+                self.edit_input_information_bat.text().strip(),
+            )
+            self.config.set_output_folder(self.edit_output.text().strip())
+            self.edit_output.setText(self.config.output_folder)
+            self.edit_daily.setText(self.config.daily_tracking_file)
             self.config.ensure_folders()
             self.config.save()
             self.logger.info("Đã lưu cấu hình vào %s", self.config.path)
 
-            # Khởi động lại watcher để áp dụng thư mục download mới.
+            # Khởi động lại watcher để áp dụng thư mục output mới.
             self.watcher.stop()
-            self.watcher = DownloadWatcher(self.config, self.database, self.logger)
+            self.watcher = OutputWatcher(self.config, self.database, self.logger)
             self.watcher.signals.output_ready.connect(self.on_output_ready)
             self.watcher.signals.file_error.connect(self.on_file_error)
             self.watcher.signals.log_message.connect(self.append_log)
@@ -1019,14 +1076,15 @@ class MainWindow(QMainWindow):
             f"• File .bat mở trợ lý: {'OK' if os.path.isfile(bat) else 'KHÔNG TỒN TẠI'}"
             f"\n  {bat}"
         )
-        rpa_bat = self.edit_rpa_bat.text().strip()
+        create_new_bat = self.edit_create_new_bat.text().strip()
         lines.append(
-            f"• File .bat chạy RPA: "
-            f"{'OK' if os.path.isfile(rpa_bat) else 'KHÔNG TỒN TẠI'}\n  {rpa_bat}"
+            f"• File .bat tạo 1 Số QT mới: "
+            f"{'OK' if os.path.isfile(create_new_bat) else 'KHÔNG TỒN TẠI'}\n  {create_new_bat}"
         )
-        dl = self.edit_download.text().strip()
+        input_information_bat = self.edit_input_information_bat.text().strip()
         lines.append(
-            f"• Thư mục download: {'OK' if os.path.isdir(dl) else 'KHÔNG TỒN TẠI'}\n  {dl}"
+            f"• File .bat nhập thông tin: "
+            f"{'OK' if os.path.isfile(input_information_bat) else 'KHÔNG TỒN TẠI'}\n  {input_information_bat}"
         )
         out = self.edit_output.text().strip()
         lines.append(
@@ -1073,10 +1131,10 @@ class MainWindow(QMainWindow):
             )
             self.set_overall_status(
                 "WAITING_FOR_DOWNLOAD",
-                "Đã mở trợ lý quyết toán. Đang chờ tải file output...",
+                "Đã mở trợ lý quyết toán. Đang chờ file output trong thư mục output...",
             )
             self.logger.info("Đã mở trợ lý quyết toán qua file .bat: %s", bat_path)
-            self.append_log("Đã mở trợ lý quyết toán. Đang chờ tải file output...")
+            self.append_log("Đã mở trợ lý quyết toán. Đang chờ file output trong thư mục output...")
         except Exception as exc:  # noqa: BLE001
             self.logger.exception("Lỗi khi mở trợ lý quyết toán.")
             self.show_error(
@@ -1090,8 +1148,8 @@ class MainWindow(QMainWindow):
     def on_output_ready(self, result: Dict[str, Any]) -> None:
         """Nhận tín hiệu từ watcher khi có file bóc tách mới.
 
-        File JSON tải về là bộ nhớ tạm của lô đang làm: nó giữ nguyên trong
-        Downloads để người dùng kiểm tra ở Bước 2 và Bước 3 đọc trực tiếp. Lô
+        File JSON bóc tách là bộ nhớ tạm của lô đang làm: nó giữ nguyên trong
+        output để người dùng kiểm tra ở Bước 2 và Bước 3 đọc trực tiếp. Lô
         mới thay thế lô cũ nên bản JSON tạm trước đó được dọn đi.
         """
         self._discard_temp_json(keep_path=result.get("working_path"))
@@ -1110,13 +1168,13 @@ class MainWindow(QMainWindow):
     def _discard_temp_json(self, keep_path: Optional[str] = None) -> None:
         """Xóa file JSON tạm đang giữ (nếu có) khi nó không còn cần nữa.
 
-        Chỉ xóa file nằm trong thư mục tải về đã cấu hình, để không bao giờ
+        Chỉ xóa file nằm trong thư mục output đã cấu hình, để không bao giờ
         đụng vào file người dùng để ở nơi khác.
         """
         path = (self.current_working_file or {}).get("working_path") or ""
         if not path or (keep_path and os.path.normcase(path) == os.path.normcase(keep_path)):
             return
-        if not file_utils.is_in_folder(path, self.config.download_folder):
+        if not file_utils.is_in_folder(path, self.config.output_folder):
             return
         if file_utils.remove_file(path):
             self.watcher.forget(path)
@@ -1134,14 +1192,14 @@ class MainWindow(QMainWindow):
         if not self.current_working_file:
             self.show_warning(
                 "Chưa có file",
-                "Chưa có file bóc tách nào. Hãy mở trợ lý ở Bước 1 và tải file về.",
+                "Chưa có file bóc tách nào. Hãy mở trợ lý ở Bước 1 và lưu file vào thư mục output.",
             )
             return
         path = self.current_working_file.get("working_path")
         if not path or not os.path.exists(path):
             self.show_error(
                 "File không tồn tại",
-                "File bóc tách không còn tồn tại trên ổ đĩa. Hãy tải lại file từ trợ lý.",
+                "File bóc tách không còn tồn tại trên ổ đĩa. Hãy lưu lại file vào thư mục output.",
             )
             self._update_button_states()
             return
@@ -1194,7 +1252,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self.logger.exception("Không mở được dữ liệu bóc tách JSON.")
             self.lbl_file_note.setText(
-                "Không mở được dữ liệu bóc tách JSON. Hãy kiểm tra lại file tải về. "
+                "Không mở được dữ liệu bóc tách JSON. Hãy kiểm tra lại file trong output. "
                 f"Chi tiết: {exc}"
             )
             self.set_overall_status(
@@ -1488,6 +1546,143 @@ class MainWindow(QMainWindow):
     # ================================================================== #
     # Bước 4: chạy luồng PAD RPA lên phần mềm quyết toán
     # ================================================================== #
+    def _begin_rpa_cooldown(self) -> None:
+        self._rpa_cooldown = True
+        self._update_button_states()
+        QTimer.singleShot(5000, self._end_rpa_cooldown)
+
+    def _mark_rpa_launched(self, message: str) -> None:
+        launched_at = datetime.now().strftime("%H:%M:%S ngày %d/%m/%Y")
+        self._rpa_launched_at = launched_at
+        self.lbl_rpa_status.setText(f"{message} lúc {launched_at}.")
+        self.append_log(f"{message} lúc {launched_at}.")
+        self._begin_rpa_cooldown()
+
+    def on_create_new_sqt(self) -> None:
+        """Gọi flow PAD tạo đúng một Số QT mới, không đọc Excel."""
+        bat_path = self.config.pad_create_new_bat_path
+        missing = (
+            "Không tìm thấy file chạy RPA tạo mới.\n"
+            "Vui lòng kiểm tra cấu hình đường dẫn BAT."
+        )
+        try:
+            launch_bat(
+                bat_path,
+                logger=self.logger,
+                description="tạo 1 Số QT mới",
+                missing_message=missing,
+            )
+        except RpaLaunchError as exc:
+            self.logger.error("Không khởi chạy được RPA tạo mới: %s", exc)
+            self.show_error(
+                "Không chạy được RPA tạo mới",
+                f"{exc}\n\nĐường dẫn hiện tại: {bat_path}",
+            )
+            return
+
+        self.logger.info("Đã gọi BAT tạo 1 Số QT mới: %s", bat_path)
+        self._mark_rpa_launched("Đã khởi chạy RPA tạo 1 Số QT mới")
+
+    def on_input_information(self) -> None:
+        """Đọc SQT từ Excel, ghi JSON lựa chọn rồi gọi flow PAD nhập thông tin."""
+        if self._select_sqt_dialog_open:
+            self.show_warning(
+                "Đang chọn SQT",
+                "Có một cửa sổ chọn Số quyết toán đang mở. Vui lòng hoàn tất cửa sổ đó trước.",
+            )
+            return
+
+        daily_path = self.config.daily_tracking_file
+        input_bat = self.config.pad_input_information_bat_path
+        missing_bat = (
+            "Không tìm thấy file chạy RPA nhập thông tin.\n"
+            "Vui lòng kiểm tra cấu hình đường dẫn BAT."
+        )
+        try:
+            validate_bat_path(input_bat, missing_bat)
+        except RpaLaunchError as exc:
+            self.logger.error("Không tìm thấy BAT nhập thông tin: %s", input_bat)
+            self.show_error(
+                "Không tìm thấy BAT nhập thông tin",
+                f"{exc}\n\nĐường dẫn hiện tại: {input_bat}",
+            )
+            return
+
+        self.logger.info("Người dùng mở popup chọn SQT từ file: %s", daily_path)
+        try:
+            sqt_items = read_sqt_items(daily_path)
+        except DailyFileNotFoundError as exc:
+            self.logger.error("Không tìm thấy file Excel hằng ngày: %s", daily_path)
+            self.show_error(
+                "Không tìm thấy file Excel hằng ngày",
+                f"{exc}\n\nĐường dẫn hiện tại: {daily_path}",
+            )
+            return
+        except DailyFileLockedError as exc:
+            self.logger.error("File Excel hằng ngày đang bị khóa: %s", daily_path)
+            self.show_warning("File Excel đang bị khóa", str(exc))
+            return
+        except (MissingSheetError, MissingColumnError, EmptySqtListError) as exc:
+            self.logger.error("Dữ liệu SQT trong Excel chưa hợp lệ: %s", exc)
+            self.show_error("Dữ liệu Excel chưa hợp lệ", str(exc))
+            return
+        except SqtSelectionError as exc:
+            self.logger.exception("Không đọc được danh sách SQT.")
+            self.show_error("Không đọc được file Excel", str(exc))
+            return
+
+        self.logger.info("Đọc được %s SQT từ sheet Thong_Tin_Quyet_Toan.", len(sqt_items))
+        dialog = SelectSqtDialog(sqt_items, self)
+        self._select_sqt_dialog_open = True
+        self._update_button_states()
+        try:
+            result = dialog.exec()
+        finally:
+            self._select_sqt_dialog_open = False
+            self._update_button_states()
+
+        if result != QDialog.Accepted:
+            self.logger.info("Người dùng hủy popup chọn SQT; không ghi JSON và không gọi BAT.")
+            return
+
+        selected_sqt = dialog.selected_values()
+        if not selected_sqt:
+            self.show_warning(
+                "Chưa chọn SQT",
+                "Vui lòng chọn ít nhất một Số quyết toán.",
+            )
+            return
+
+        try:
+            json_path = write_selection_json(
+                self.config.rpa_input_selection_path,
+                daily_path,
+                selected_sqt,
+            )
+        except SelectionJsonWriteError as exc:
+            self.logger.exception("Không ghi được JSON lựa chọn SQT.")
+            self.show_error("Không ghi được JSON", str(exc))
+            return
+
+        self.logger.info("Danh sách SQT đã chọn: %s", selected_sqt)
+        self.logger.info("Đã tạo JSON lựa chọn RPA: %s", json_path)
+        self.logger.info("File Excel hằng ngày dùng cho PAD: %s", os.path.abspath(daily_path))
+
+        try:
+            launch_bat(
+                input_bat,
+                logger=self.logger,
+                description="nhập thông tin",
+                missing_message=missing_bat,
+            )
+        except RpaLaunchError as exc:
+            self.logger.error("Không khởi chạy được RPA nhập thông tin: %s", exc)
+            self.show_error("Không chạy được RPA nhập thông tin", str(exc))
+            return
+
+        self.logger.info("Đã gọi BAT nhập thông tin: %s", input_bat)
+        self._mark_rpa_launched("Đã khởi chạy RPA nhập thông tin")
+
     def on_run_rpa(self) -> None:
         rpa_bat = self.config.pad_bat_path
         if not rpa_bat or not os.path.isfile(rpa_bat):

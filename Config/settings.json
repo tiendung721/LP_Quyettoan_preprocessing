@@ -1,0 +1,25 @@
+{
+  "app_root": "C:\\Users\\Admin\\Desktop\\test\\quyettoan_pm_project",
+  "bat_path": "C:\\Users\\Admin\\Desktop\\test\\quyettoan_agent_project\\RPA_ChatGPT_Launcher\\Mo_Tro_Ly_RPA.bat",
+  "pad_bat_path": "C:\\Users\\Admin\\Desktop\\test\\quyettoan_pm_project\\Launcher\\Chay_PAD_Quyet_Toan.bat",
+  "pad_create_new_bat_path": "C:\\Users\\Admin\\Desktop\\test\\quyettoan_pm_project\\Launcher\\run_create_new_quyet_toan.bat",
+  "pad_input_information_bat_path": "C:\\Users\\Admin\\Desktop\\test\\quyettoan_pm_project\\Launcher\\run_input_information.bat",
+  "output_folder": "C:\\Users\\Admin\\Desktop\\test\\quyettoan_pm_project\\output",
+  "daily_tracking_file": "C:\\Users\\Admin\\Desktop\\test\\quyettoan_pm_project\\output\\quyet_toan_hang_ngay.xlsx",
+  "allowed_extensions": [
+    ".json"
+  ],
+  "output_file_patterns": [
+    "boc_tach*.json",
+    "rpa_input*.json",
+    "*.json"
+  ],
+  "file_stable_seconds": 3,
+  "cargo_name_mappings": {
+    "VOI": "Vôi",
+    "VOI ROI": "Vôi rời",
+    "VOI BOT": "Vôi bột",
+    "VOI BOT NONG NGHIEP": "Vôi bột nông nghiệp",
+    "BOT NN BAO 25 KG": "Bột NN bao 25 kg"
+  }
+}

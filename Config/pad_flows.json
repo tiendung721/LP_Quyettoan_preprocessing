@@ -1,0 +1,20 @@
+{
+  "create_new": {
+    "workflow_name": "Test - tạo dòng quyết toán mới",
+    "workflow_id": "",
+    "environment_id": "",
+    "autologin": false
+  },
+  "input_information": {
+    "workflow_name": "Test - nhập thông tin",
+    "workflow_id": "",
+    "environment_id": "",
+    "autologin": false,
+    "input_arguments_enabled": false,
+    "input_argument_names": {
+      "selection_json": "SelectionJsonPath",
+      "helper_script": "HelperScriptPath",
+      "project_root": "ProjectRoot"
+    }
+  }
+}

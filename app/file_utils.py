@@ -51,7 +51,7 @@ def is_file_locked(path: str) -> bool:
     return False
 
 
-def is_temp_download_file(path: str) -> bool:
+def is_temp_output_file(path: str) -> bool:
     """Trả về True nếu là file tạm không nên xử lý.
 
     Gồm: đuôi .crdownload, .tmp, .part hoặc tên bắt đầu bằng '~$'.
@@ -148,30 +148,28 @@ def sha256_file(path: str, chunk_size: int = 1024 * 1024) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Thông tin file tải về (giữ nguyên tại thư mục Downloads)
+# Thông tin file output trong thư mục làm việc duy nhất
 # ---------------------------------------------------------------------------
-def download_file_info(download_path: str) -> Dict:
-    """Thu thập thông tin file vừa tải về mà KHÔNG di chuyển/sao lưu.
+def output_file_info(output_path: str) -> Dict:
+    """Thu thập thông tin file output mà KHÔNG di chuyển/sao lưu.
 
-    File JSON tải về là bộ nhớ tạm của một lô bóc tách: nó nằm nguyên trong thư
-    mục Downloads để người dùng xem/sửa ở Bước 2 và để Bước 3 đọc trực tiếp.
+    File JSON bóc tách nằm trực tiếp trong thư mục output để người dùng xem/sửa
+    ở Bước 2 và để Bước 3 đọc trực tiếp.
 
-    Trả về dict thông tin file đang làm việc (chính là file trong Downloads).
+    Trả về dict thông tin file đang làm việc.
     """
-    if not os.path.exists(download_path):
-        raise FileNotFoundError(download_path)
+    if not os.path.exists(output_path):
+        raise FileNotFoundError(output_path)
 
     return {
-        "original_download_path": download_path,
+        "original_download_path": output_path,
         "backup_path": None,
-        "working_path": download_path,
-        "file_name": os.path.basename(download_path),
-        "file_size": os.path.getsize(download_path),
-        "file_hash": sha256_file(download_path),
+        "working_path": output_path,
+        "file_name": os.path.basename(output_path),
+        "file_size": os.path.getsize(output_path),
+        "file_hash": sha256_file(output_path),
         "detected_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
-
-
 def is_in_folder(path: str, folder: str) -> bool:
     """True nếu ``path`` nằm ngay trong ``folder`` (so sánh không phân biệt hoa/thường)."""
     if not path or not folder:
@@ -207,7 +205,7 @@ def find_latest_output_file(
     """Tìm file bóc tách hợp lệ mới nhất (theo thời gian sửa) trong ``folder``.
 
     Dùng khi mở lại app mà bản ghi cũ không còn file: phần mềm tự nhận file mới
-    nhất trong thư mục tải về thay vì bắt người dùng chọn tay.
+    nhất trong thư mục output thay vì bắt người dùng chọn tay.
     """
     if not folder or not os.path.isdir(folder):
         return None
@@ -218,7 +216,7 @@ def find_latest_output_file(
         path = os.path.join(folder, name)
         if not os.path.isfile(path):
             continue
-        if is_temp_download_file(path):
+        if is_temp_output_file(path):
             continue
         if not is_allowed_output_file(path, allowed_extensions, patterns):
             continue

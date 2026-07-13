@@ -56,6 +56,7 @@ INFO_HEADERS = [
     "Hóa Đơn quyết toán",
     "Ghi chú",
     "Trạng thái nhập",
+    "Ngày nhập cuối",
     "Ngày cập nhật",
     "MD5",
 ]
@@ -1270,6 +1271,7 @@ class DailyImportService:
         ignored = {
             "MD5",
             "Trạng thái nhập",
+            "Ngày nhập cuối",
             "Ngày cập nhật",
         }
         conflicts = []
@@ -1387,7 +1389,7 @@ class DailyImportService:
 
     def _validate_daily_headers(self, ws, expected: Sequence[str]) -> Dict[str, int]:
         mapping = self._header_map(ws)
-        auto_addable = {"Biển số xe", "Ngày cập nhật", "MD5"}
+        auto_addable = {"Biển số xe", "Ngày nhập cuối", "Ngày cập nhật", "MD5"}
         missing = [
             name
             for name in expected
@@ -1412,6 +1414,8 @@ class DailyImportService:
                 self._ensure_column(ws, "Biển số xe", before_header="Số chì/Seal")
             self._ensure_column(ws, "Trạng thái nhập")
             self._ensure_column(ws, "Ngày cập nhật", before_header="MD5")
+            if sheet_name == INFO_SHEET:
+                self._ensure_column(ws, "Ngày nhập cuối", before_header="Ngày cập nhật")
             if "MD5" not in self._header_map(ws):
                 self._ensure_column(ws, "MD5")
             mapping = self._header_map(ws)
@@ -1487,9 +1491,11 @@ class DailyImportService:
                 if header in mapping:
                     for row_number in range(2, ws.max_row + 1):
                         ws.cell(row_number, mapping[header]).number_format = "dd/mm/yyyy"
-            if "Ngày cập nhật" in mapping:
+            for header in ("Ngày nhập cuối", "Ngày cập nhật"):
+                if header not in mapping:
+                    continue
                 for row_number in range(2, ws.max_row + 1):
-                    ws.cell(row_number, mapping["Ngày cập nhật"]).number_format = (
+                    ws.cell(row_number, mapping[header]).number_format = (
                         "dd/mm/yyyy hh:mm:ss"
                     )
             for header in ("Giá vật liệu", "Đơn giá", "Thành tiền", "VAT", "Tổng tiền"):
