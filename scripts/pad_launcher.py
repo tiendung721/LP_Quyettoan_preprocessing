@@ -31,6 +31,17 @@ DEFAULT_FLOWS: Dict[str, Dict[str, Any]] = {
             "project_root": "ProjectRoot",
         },
     },
+    "input_expense": {
+        "workflow_name": "Test - nhập khoản chi",
+        "workflow_id": "",
+        "environment_id": "",
+        "autologin": False,
+        "input_argument_names": {
+            "selection_json": "SelectionJsonPath",
+            "helper_script": "HelperScriptPath",
+            "project_root": "ProjectRoot",
+        },
+    },
 }
 
 
@@ -83,7 +94,7 @@ def load_flow_config(project_root: Path, flow_key: str) -> Dict[str, Any]:
 
 
 def input_arguments(project_root: Path, flow_key: str, config: Dict[str, Any]) -> Dict[str, str]:
-    if flow_key != "input_information":
+    if flow_key not in {"input_information", "input_expense"}:
         return {}
     if config.get("input_arguments_enabled") is False:
         return {}

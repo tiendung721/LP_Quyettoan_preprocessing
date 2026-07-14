@@ -7,9 +7,10 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
-from app.daily_import import INFO_SHEET
+from app.daily_import import EXPENSE_SHEET, INFO_SHEET
 from app.services.sqt_selection_service import (
     EmptySqtListError,
+    EXPENSE_SELECTION_OPERATION,
     MissingColumnError,
     MissingSheetError,
     normalize_sqt_value,
@@ -95,7 +96,24 @@ class SqtSelectionServiceTests(unittest.TestCase):
         self.assertNotIn("CREATE_NEW", json.dumps(payload, ensure_ascii=False))
         self.assertFalse(target.with_name(target.name + ".tmp").exists())
 
+    def test_write_selection_json_supports_expense_operation(self) -> None:
+        target = self.root / "runtime" / "rpa_input_selection.json"
+
+        write_selection_json(
+            target,
+            str(self.daily),
+            ["700"],
+            sheet_name=EXPENSE_SHEET,
+            operation=EXPENSE_SELECTION_OPERATION,
+        )
+
+        with open(target, encoding="utf-8") as f:
+            payload = json.load(f)
+
+        self.assertEqual(payload["operation"], "NHAP_KHOAN_CHI")
+        self.assertEqual(payload["sheet_name"], EXPENSE_SHEET)
+        self.assertEqual(payload["selected_sqt"], ["700"])
+
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -47,7 +47,7 @@ from PySide6.QtWidgets import (
 
 from . import file_utils
 from .config import AppConfig
-from .daily_import import DailyImportError, ImportAnalysis, ImportSummary
+from .daily_import import EXPENSE_SHEET, INFO_SHEET, DailyImportError, ImportAnalysis, ImportSummary
 from .daily_import import DailyImportService, remove_extract_rows
 from .daily_import_ui import (
     ConflictDialog,
@@ -62,9 +62,11 @@ from .services.sqt_selection_service import (
     DailyFileLockedError,
     DailyFileNotFoundError,
     EmptySqtListError,
+    EXPENSE_SELECTION_OPERATION,
     MissingColumnError,
     MissingSheetError,
     SelectionJsonWriteError,
+    SELECTION_OPERATION,
     SqtSelectionError,
     read_sqt_items,
     write_selection_json,
@@ -573,7 +575,8 @@ class MainWindow(QMainWindow):
         )
         guide4.addWidget(self._guide_label(
             "Tạo Số QT mới sẽ gọi riêng flow PAD tạo mới và không đọc Excel. Nhập thông tin sẽ đọc "
-            "sheet Thong_Tin_Quyet_Toan, cho chọn một hoặc nhiều SQT rồi ghi JSON tạm cho PAD."
+            "sheet Thong_Tin_Quyet_Toan; Nhập khoản chi sẽ đọc sheet Khoan_Chi. Cả hai đều cho "
+            "chọn một hoặc nhiều SQT rồi ghi JSON tạm cho PAD."
         ))
         self.lbl_rpa_status = QLabel("Chưa chạy luồng RPA trong phiên này.")
         self.lbl_rpa_status.setObjectName("hintText")
@@ -599,6 +602,16 @@ class MainWindow(QMainWindow):
             action=True,
         )
         body4.addLayout(self._action_row(self.btn_input_information, self.lbl_input_information_path))
+
+        self.lbl_input_expense_path = QLabel("")
+        self.lbl_input_expense_path.setObjectName("metaText")
+        self.btn_input_expense = self._make_button(
+            "Nhập khoản chi",
+            self.on_input_expense,
+            variant="primary",
+            action=True,
+        )
+        body4.addLayout(self._action_row(self.btn_input_expense, self.lbl_input_expense_path))
         v.addWidget(self.card_step4)
 
         v.addStretch(1)
@@ -626,6 +639,7 @@ class MainWindow(QMainWindow):
         self.edit_input_information_bat = QLineEdit(
             self.config.pad_input_information_bat_path
         )
+        self.edit_input_expense_bat = QLineEdit(self.config.pad_input_expense_bat_path)
         self.edit_output = QLineEdit(self.config.output_folder)
         self.edit_daily = QLineEdit(self.config.daily_tracking_file)
         self.edit_daily.setReadOnly(True)
@@ -641,6 +655,11 @@ class MainWindow(QMainWindow):
                 "File .bat nhập thông tin:",
                 self.edit_input_information_bat,
                 self._browse_input_information_bat,
+            ),
+            (
+                "File .bat nhập khoản chi:",
+                self.edit_input_expense_bat,
+                self._browse_input_expense_bat,
             ),
             ("Thư mục output:", self.edit_output, self._browse_output),
             ("File theo dõi hàng ngày trong output:", self.edit_daily, None),
@@ -871,6 +890,9 @@ class MainWindow(QMainWindow):
         self.btn_input_information.setEnabled(
             not self._rpa_cooldown and not self._select_sqt_dialog_open
         )
+        self.btn_input_expense.setEnabled(
+            not self._rpa_cooldown and not self._select_sqt_dialog_open
+        )
 
         self._refresh_daily_labels()
         self._refresh_step_states()
@@ -904,6 +926,18 @@ class MainWindow(QMainWindow):
                 "Chưa cấu hình BAT nhập thông tin (xem tab Cài đặt)"
             )
             self.lbl_input_information_path.setToolTip("")
+
+        expense_bat = self.config.pad_input_expense_bat_path
+        if expense_bat and os.path.isfile(expense_bat):
+            self.lbl_input_expense_path.setText(
+                "Nhập khoản chi: " + os.path.basename(expense_bat)
+            )
+            self.lbl_input_expense_path.setToolTip(expense_bat)
+        else:
+            self.lbl_input_expense_path.setText(
+                "Chưa cấu hình BAT nhập khoản chi (xem tab Cài đặt)"
+            )
+            self.lbl_input_expense_path.setToolTip("")
 
     def _refresh_saved_label(self) -> None:
         """Đồng bộ dòng “Lưu thành công lần cuối” với thời điểm lưu thật của file."""
@@ -1024,6 +1058,16 @@ class MainWindow(QMainWindow):
         if path:
             self.edit_input_information_bat.setText(os.path.normpath(path))
 
+    def _browse_input_expense_bat(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Chọn file .bat nhập khoản chi",
+            self.edit_input_expense_bat.text(),
+            "Batch (*.bat);;Tất cả (*.*)",
+        )
+        if path:
+            self.edit_input_expense_bat.setText(os.path.normpath(path))
+
     def _browse_output(self) -> None:
         path = QFileDialog.getExistingDirectory(
             self, "Chọn thư mục output", self.edit_output.text()
@@ -1045,6 +1089,10 @@ class MainWindow(QMainWindow):
             self.config.set(
                 "pad_input_information_bat_path",
                 self.edit_input_information_bat.text().strip(),
+            )
+            self.config.set(
+                "pad_input_expense_bat_path",
+                self.edit_input_expense_bat.text().strip(),
             )
             self.config.set_output_folder(self.edit_output.text().strip())
             self.edit_output.setText(self.config.output_folder)
@@ -1085,6 +1133,11 @@ class MainWindow(QMainWindow):
         lines.append(
             f"• File .bat nhập thông tin: "
             f"{'OK' if os.path.isfile(input_information_bat) else 'KHÔNG TỒN TẠI'}\n  {input_information_bat}"
+        )
+        input_expense_bat = self.edit_input_expense_bat.text().strip()
+        lines.append(
+            f"• File .bat nhập khoản chi: "
+            f"{'OK' if os.path.isfile(input_expense_bat) else 'KHÔNG TỒN TẠI'}\n  {input_expense_bat}"
         )
         out = self.edit_output.text().strip()
         lines.append(
@@ -1583,8 +1636,18 @@ class MainWindow(QMainWindow):
         self.logger.info("Đã gọi BAT tạo 1 Số QT mới: %s", bat_path)
         self._mark_rpa_launched("Đã khởi chạy RPA tạo 1 Số QT mới")
 
-    def on_input_information(self) -> None:
-        """Đọc SQT từ Excel, ghi JSON lựa chọn rồi gọi flow PAD nhập thông tin."""
+    def _run_selected_sqt_rpa(
+        self,
+        *,
+        sheet_name: str,
+        operation: str,
+        bat_path: str,
+        action_label: str,
+        missing_bat_title: str,
+        missing_bat_message: str,
+        launched_message: str,
+    ) -> None:
+        """Đọc SQT từ Excel, ghi JSON lựa chọn rồi gọi một flow PAD có chọn SQT."""
         if self._select_sqt_dialog_open:
             self.show_warning(
                 "Đang chọn SQT",
@@ -1593,24 +1656,24 @@ class MainWindow(QMainWindow):
             return
 
         daily_path = self.config.daily_tracking_file
-        input_bat = self.config.pad_input_information_bat_path
-        missing_bat = (
-            "Không tìm thấy file chạy RPA nhập thông tin.\n"
-            "Vui lòng kiểm tra cấu hình đường dẫn BAT."
-        )
         try:
-            validate_bat_path(input_bat, missing_bat)
+            validate_bat_path(bat_path, missing_bat_message)
         except RpaLaunchError as exc:
-            self.logger.error("Không tìm thấy BAT nhập thông tin: %s", input_bat)
+            self.logger.error("Không tìm thấy BAT %s: %s", action_label, bat_path)
             self.show_error(
-                "Không tìm thấy BAT nhập thông tin",
-                f"{exc}\n\nĐường dẫn hiện tại: {input_bat}",
+                missing_bat_title,
+                f"{exc}\n\nĐường dẫn hiện tại: {bat_path}",
             )
             return
 
-        self.logger.info("Người dùng mở popup chọn SQT từ file: %s", daily_path)
+        self.logger.info(
+            "Người dùng mở popup chọn SQT cho %s từ file: %s (sheet %s)",
+            action_label,
+            daily_path,
+            sheet_name,
+        )
         try:
-            sqt_items = read_sqt_items(daily_path)
+            sqt_items = read_sqt_items(daily_path, sheet_name=sheet_name)
         except DailyFileNotFoundError as exc:
             self.logger.error("Không tìm thấy file Excel hằng ngày: %s", daily_path)
             self.show_error(
@@ -1631,7 +1694,7 @@ class MainWindow(QMainWindow):
             self.show_error("Không đọc được file Excel", str(exc))
             return
 
-        self.logger.info("Đọc được %s SQT từ sheet Thong_Tin_Quyet_Toan.", len(sqt_items))
+        self.logger.info("Đọc được %s SQT từ sheet %s.", len(sqt_items), sheet_name)
         dialog = SelectSqtDialog(sqt_items, self)
         self._select_sqt_dialog_open = True
         self._update_button_states()
@@ -1642,7 +1705,10 @@ class MainWindow(QMainWindow):
             self._update_button_states()
 
         if result != QDialog.Accepted:
-            self.logger.info("Người dùng hủy popup chọn SQT; không ghi JSON và không gọi BAT.")
+            self.logger.info(
+                "Người dùng hủy popup chọn SQT cho %s; không ghi JSON và không gọi BAT.",
+                action_label,
+            )
             return
 
         selected_sqt = dialog.selected_values()
@@ -1658,6 +1724,8 @@ class MainWindow(QMainWindow):
                 self.config.rpa_input_selection_path,
                 daily_path,
                 selected_sqt,
+                sheet_name=sheet_name,
+                operation=operation,
             )
         except SelectionJsonWriteError as exc:
             self.logger.exception("Không ghi được JSON lựa chọn SQT.")
@@ -1670,18 +1738,48 @@ class MainWindow(QMainWindow):
 
         try:
             launch_bat(
-                input_bat,
+                bat_path,
                 logger=self.logger,
-                description="nhập thông tin",
-                missing_message=missing_bat,
+                description=action_label,
+                missing_message=missing_bat_message,
             )
         except RpaLaunchError as exc:
-            self.logger.error("Không khởi chạy được RPA nhập thông tin: %s", exc)
-            self.show_error("Không chạy được RPA nhập thông tin", str(exc))
+            self.logger.error("Không khởi chạy được RPA %s: %s", action_label, exc)
+            self.show_error(f"Không chạy được RPA {action_label}", str(exc))
             return
 
-        self.logger.info("Đã gọi BAT nhập thông tin: %s", input_bat)
-        self._mark_rpa_launched("Đã khởi chạy RPA nhập thông tin")
+        self.logger.info("Đã gọi BAT %s: %s", action_label, bat_path)
+        self._mark_rpa_launched(launched_message)
+
+    def on_input_information(self) -> None:
+        """Đọc SQT từ sheet thông tin, ghi JSON lựa chọn rồi gọi flow PAD."""
+        self._run_selected_sqt_rpa(
+            sheet_name=INFO_SHEET,
+            operation=SELECTION_OPERATION,
+            bat_path=self.config.pad_input_information_bat_path,
+            action_label="nhập thông tin",
+            missing_bat_title="Không tìm thấy BAT nhập thông tin",
+            missing_bat_message=(
+                "Không tìm thấy file chạy RPA nhập thông tin.\n"
+                "Vui lòng kiểm tra cấu hình đường dẫn BAT."
+            ),
+            launched_message="Đã khởi chạy RPA nhập thông tin",
+        )
+
+    def on_input_expense(self) -> None:
+        """Đọc SQT từ sheet khoản chi, ghi JSON lựa chọn rồi gọi flow PAD."""
+        self._run_selected_sqt_rpa(
+            sheet_name=EXPENSE_SHEET,
+            operation=EXPENSE_SELECTION_OPERATION,
+            bat_path=self.config.pad_input_expense_bat_path,
+            action_label="nhập khoản chi",
+            missing_bat_title="Không tìm thấy BAT nhập khoản chi",
+            missing_bat_message=(
+                "Không tìm thấy file chạy RPA nhập khoản chi.\n"
+                "Vui lòng kiểm tra cấu hình đường dẫn BAT."
+            ),
+            launched_message="Đã khởi chạy RPA nhập khoản chi",
+        )
 
     def on_run_rpa(self) -> None:
         rpa_bat = self.config.pad_bat_path

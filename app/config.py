@@ -159,6 +159,34 @@ echo [ERROR] Python not found. Cannot launch PAD flow.
 exit /b 2
 """
 
+PAD_INPUT_EXPENSE_BAT_TEMPLATE = """@echo off
+REM Run PAD flow: import expense rows for selected SQT values.
+setlocal enableextensions enabledelayedexpansion
+
+set "PROJECT_ROOT=%~dp0.."
+for %%I in ("%PROJECT_ROOT%") do set "PROJECT_ROOT=%%~fI"
+
+if exist "%PROJECT_ROOT%\\.venv\\Scripts\\python.exe" (
+  "%PROJECT_ROOT%\\.venv\\Scripts\\python.exe" "%PROJECT_ROOT%\\scripts\\pad_launcher.py" --project-root "%PROJECT_ROOT%" --flow input_expense
+  exit /b !errorlevel!
+)
+
+where py >nul 2>nul
+if not errorlevel 1 (
+  py -3 "%PROJECT_ROOT%\\scripts\\pad_launcher.py" --project-root "%PROJECT_ROOT%" --flow input_expense
+  exit /b !errorlevel!
+)
+
+where python >nul 2>nul
+if not errorlevel 1 (
+  python "%PROJECT_ROOT%\\scripts\\pad_launcher.py" --project-root "%PROJECT_ROOT%" --flow input_expense
+  exit /b !errorlevel!
+)
+
+echo [ERROR] Python not found. Cannot launch PAD flow.
+exit /b 2
+"""
+
 
 def get_default_settings(app_root: str = DEFAULT_APP_ROOT) -> Dict[str, Any]:
     """Trả về dict cấu hình mặc định."""
@@ -172,6 +200,9 @@ def get_default_settings(app_root: str = DEFAULT_APP_ROOT) -> Dict[str, Any]:
         ),
         "pad_input_information_bat_path": os.path.join(
             app_root, "Launcher", "run_input_information.bat"
+        ),
+        "pad_input_expense_bat_path": os.path.join(
+            app_root, "Launcher", "run_input_expense.bat"
         ),
         "output_folder": output_folder,
         "daily_tracking_file": default_daily_tracking_file(app_root),
@@ -271,6 +302,10 @@ class AppConfig:
     @property
     def pad_input_information_bat_path(self) -> str:
         return self.data.get("pad_input_information_bat_path", "")
+
+    @property
+    def pad_input_expense_bat_path(self) -> str:
+        return self.data.get("pad_input_expense_bat_path", "")
 
     @property
     def output_folder(self) -> str:
@@ -376,6 +411,10 @@ class AppConfig:
         created |= self._ensure_launcher_bat(
             self.pad_input_information_bat_path,
             PAD_INPUT_INFORMATION_BAT_TEMPLATE,
+        )
+        created |= self._ensure_launcher_bat(
+            self.pad_input_expense_bat_path,
+            PAD_INPUT_EXPENSE_BAT_TEMPLATE,
         )
         return created
 

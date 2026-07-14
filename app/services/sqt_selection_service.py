@@ -18,6 +18,7 @@ from ..daily_import import INFO_SHEET
 
 SQT_COLUMN = "SQT PM"
 SELECTION_OPERATION = "NHAP_THONG_TIN"
+EXPENSE_SELECTION_OPERATION = "NHAP_KHOAN_CHI"
 
 
 class SqtSelectionError(RuntimeError):
@@ -154,6 +155,8 @@ def write_selection_json(
     daily_file: str,
     selected_sqt: Iterable[str],
     sheet_name: str = INFO_SHEET,
+    *,
+    operation: str = SELECTION_OPERATION,
 ) -> str:
     """Write the selected SQT list atomically for PAD to consume."""
     selected = [str(value) for value in selected_sqt if str(value).strip()]
@@ -167,7 +170,7 @@ def write_selection_json(
         raise SelectionJsonWriteError("Không tạo được thư mục runtime.") from exc
 
     payload = {
-        "operation": SELECTION_OPERATION,
+        "operation": str(operation or SELECTION_OPERATION).strip() or SELECTION_OPERATION,
         "daily_file": str(Path(daily_file).resolve()),
         "sheet_name": sheet_name,
         "selected_sqt": selected,
@@ -188,4 +191,3 @@ def write_selection_json(
         raise SelectionJsonWriteError("Không ghi được JSON lựa chọn RPA.") from exc
 
     return str(target.resolve())
-

@@ -4,6 +4,7 @@
   "pad_bat_path": "C:\\Users\\Admin\\Desktop\\test\\quyettoan_pm_project\\Launcher\\Chay_PAD_Quyet_Toan.bat",
   "pad_create_new_bat_path": "C:\\Users\\Admin\\Desktop\\test\\quyettoan_pm_project\\Launcher\\run_create_new_quyet_toan.bat",
   "pad_input_information_bat_path": "C:\\Users\\Admin\\Desktop\\test\\quyettoan_pm_project\\Launcher\\run_input_information.bat",
+  "pad_input_expense_bat_path": "C:\\Users\\Admin\\Desktop\\test\\quyettoan_pm_project\\Launcher\\run_input_expense.bat",
   "output_folder": "C:\\Users\\Admin\\Desktop\\test\\quyettoan_pm_project\\output",
   "daily_tracking_file": "C:\\Users\\Admin\\Desktop\\test\\quyettoan_pm_project\\output\\quyet_toan_hang_ngay.xlsx",
   "allowed_extensions": [

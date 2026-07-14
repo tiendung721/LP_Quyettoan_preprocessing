@@ -30,6 +30,10 @@ class PadLauncherTests(unittest.TestCase):
                         "workflow_name": "Test - nhập thông tin",
                         "workflow_id": "",
                     },
+                    "input_expense": {
+                        "workflow_name": "Test - nhập khoản chi",
+                        "workflow_id": "",
+                    },
                 },
                 ensure_ascii=False,
             ),
@@ -59,6 +63,18 @@ class PadLauncherTests(unittest.TestCase):
         payload = json.loads(encoded_args)
 
         self.assertEqual(self._query(url)["workflowName"], ["Test - nhập thông tin"])
+        self.assertEqual(payload["SelectionJsonPath"], str(self.root / "runtime" / "rpa_input_selection.json"))
+        self.assertEqual(payload["HelperScriptPath"], str(self.root / "scripts" / "rpa_excel_helper.py"))
+        self.assertEqual(payload["ProjectRoot"], str(self.root))
+
+    def test_input_expense_url_includes_selection_paths(self) -> None:
+        config = pad_launcher.load_flow_config(self.root, "input_expense")
+        args = pad_launcher.input_arguments(self.root, "input_expense", config)
+        url = pad_launcher.build_run_url(config, args)
+        encoded_args = self._query(url)["inputArguments"][0]
+        payload = json.loads(encoded_args)
+
+        self.assertEqual(self._query(url)["workflowName"], ["Test - nhập khoản chi"])
         self.assertEqual(payload["SelectionJsonPath"], str(self.root / "runtime" / "rpa_input_selection.json"))
         self.assertEqual(payload["HelperScriptPath"], str(self.root / "scripts" / "rpa_excel_helper.py"))
         self.assertEqual(payload["ProjectRoot"], str(self.root))
