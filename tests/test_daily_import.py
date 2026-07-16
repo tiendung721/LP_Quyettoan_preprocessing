@@ -26,7 +26,7 @@ from app.database import Database
 
 
 LEGACY_INFO_HEADERS = list(INFO_HEADERS)
-LEGACY_EXPENSE_HEADERS = list(EXPENSE_HEADERS)
+LEGACY_EXPENSE_HEADERS = [name for name in EXPENSE_HEADERS if name != "Nơi đóng"]
 
 
 class DailyImportServiceTests(unittest.TestCase):
@@ -71,6 +71,7 @@ class DailyImportServiceTests(unittest.TestCase):
                 "Số Container": "EFGH1234567",
                 "Số tấn": 27.0,
                 "Loại hàng": "Vôi",
+                "Nơi đóng": "Kho B",
                 "Tên tàu": "TÀU B 02S",
                 "Ngày chạy": datetime(2026, 6, 4),
                 "VT biển": "Hãng B",
@@ -166,7 +167,9 @@ class DailyImportServiceTests(unittest.TestCase):
         info = wb[INFO_SHEET]
         expense = wb[EXPENSE_SHEET]
         self.assertIn("MD5", [cell.value for cell in info[1]])
-        self.assertIn("MD5", [cell.value for cell in expense[1]])
+        expense_headers = {cell.value: cell.column for cell in expense[1]}
+        self.assertIn("MD5", expense_headers)
+        self.assertIn("Nơi đóng", expense_headers)
         self.assertEqual(info.max_row, 4)
         self.assertEqual(expense.max_row, 2)
         headers = {cell.value: cell.column for cell in info[1]}
@@ -175,6 +178,7 @@ class DailyImportServiceTests(unittest.TestCase):
         self.assertEqual(info.cell(4, headers["Loại hàng"]).value, "Vôi rời")
         self.assertEqual(info.cell(4, headers["Người nhận"]).value, "LÊ PHẠM")
         self.assertEqual(info.cell(4, headers["Trạng thái nhập"]).value, "Chưa nhập")
+        self.assertEqual(expense.cell(2, expense_headers["Nơi đóng"]).value, "Kho B")
         wb.close()
 
         again = self.service.analyze(str(self.output), str(self.daily), 1)
@@ -379,6 +383,46 @@ class DailyImportServiceTests(unittest.TestCase):
         second = self.service.analyze(str(self.output), str(self.daily), 1)
         self.assertEqual(len(second.expense_changes), 1)
         self.assertEqual(second.expense_changes[0].action, "UPDATE")
+        self.assertEqual(second.expense_changes[0].values["Nơi đóng"], "Kho B")
+
+    def test_expense_place_follows_updated_settlement_row(self) -> None:
+        self._write_output_rows(
+            {
+                "file_nguon": "cost-place.jpg",
+                "ma_md5_file": "cost-place",
+                "loai_chung_tu": "Khoản chi",
+                "ngay_chay": "03/06/2026",
+                "so_container": "EFGH1234567",
+                "so_hd": "PLACE",
+                "don_gia": 100,
+            }
+        )
+        self.service.commit(self.service.analyze(str(self.output), str(self.daily), 1))
+        self.assertEqual(self._expense_place_column(), ["Kho B"])
+
+        self._write_output_rows(
+            {
+                "file_nguon": "scale-place-update.jpg",
+                "ma_md5_file": "scale-place-update",
+                "loai_chung_tu": "Phiếu cân",
+                "trang_thai": "OK",
+                "ngay_dong": "03/06/2026",
+                "so_container": "EFGH1234567",
+                "so_tan": 27.0,
+                "loai_hang": "Vôi",
+                "noi_dong": "Kho D",
+                "do_tin_cay": "Cao",
+            }
+        )
+        analysis = self.service.analyze(str(self.output), str(self.daily), 1)
+        self.assertEqual(len(analysis.info_changes), 1)
+        self.assertEqual(analysis.expense_changes, [])
+        self.assertIn("Nơi đóng", {conflict.field_name for conflict in analysis.conflicts})
+
+        decisions = {conflict.conflict_id: True for conflict in analysis.conflicts}
+        self.service.commit(analysis, conflict_decisions=decisions)
+
+        self.assertEqual(self._expense_place_column(), ["Kho D"])
 
     def test_missing_md5_still_imports(self) -> None:
         self._write_output_rows(
@@ -397,6 +441,35 @@ class DailyImportServiceTests(unittest.TestCase):
         self.assertEqual(analysis.new_info_count, 1)
         self.assertEqual(analysis.info_changes[0].values["Biển số xe"], "15H 22404")
         self.assertEqual(analysis.info_changes[0].values["MD5"], "")
+
+    def test_scale_matches_existing_row_by_date_and_container_ignoring_cargo(self) -> None:
+        self._write_output_rows(
+            {
+                "file_nguon": "scale-cargo-mismatch.jpg",
+                "ma_md5_file": "scale-cargo-mismatch",
+                "loai_chung_tu": "Phiếu cân",
+                "trang_thai": "OK",
+                "ngay_dong": "01/06/2026",
+                "so_container": "ABCD1234567",
+                "bien_so_xe": "15H-15912",
+                "so_tan": 27.88,
+                "loai_hang": "VOI",
+                "noi_dong": "Kho A",
+                "do_tin_cay": "Cao",
+            }
+        )
+
+        analysis = self.service.analyze(str(self.output), str(self.daily), 1)
+
+        self.assertEqual(analysis.new_info_count, 0)
+        self.assertEqual(analysis.updated_info_count, 1)
+        change = analysis.info_changes[0]
+        self.assertEqual(change.action, "UPDATE")
+        self.assertEqual(change.target_row, 2)
+        self.assertEqual(change.sqt, 100)
+        self.assertEqual(change.values["SQT PM"], 100)
+        self.assertEqual(change.values["Số Container"], "ABCD1234567")
+        self.assertIn("Loại hàng", {conflict.field_name for conflict in analysis.conflicts})
 
     def test_scale_matching_multiple_sqt_is_unmatched(self) -> None:
         self._append_info_row(200, datetime(2026, 6, 12), "MULT1234567", 20)
@@ -535,6 +608,18 @@ class DailyImportServiceTests(unittest.TestCase):
         headers = {cell.value: cell.column for cell in expense[1]}
         written = [
             expense.cell(row, headers["SQT PM"]).value
+            for row in range(2, expense.max_row + 1)
+        ]
+        wb.close()
+        return written
+
+    def _expense_place_column(self) -> list:
+        """Các giá trị Nơi đóng đã ghi vào sheet Khoan_Chi."""
+        wb = load_workbook(self.daily)
+        expense = wb[EXPENSE_SHEET]
+        headers = {cell.value: cell.column for cell in expense[1]}
+        written = [
+            expense.cell(row, headers["Nơi đóng"]).value
             for row in range(2, expense.max_row + 1)
         ]
         wb.close()

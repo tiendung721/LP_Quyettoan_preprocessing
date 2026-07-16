@@ -65,6 +65,7 @@ EXPENSE_HEADERS = [
     "SQT PM",
     "Ngày tháng",
     "Số Container",
+    "Nơi đóng",
     "Số HĐ",
     "Giá vật liệu",
     "Đơn giá",
@@ -337,6 +338,13 @@ def parse_number(value: Any) -> Optional[float]:
         return float(text)
     except ValueError:
         return None
+
+
+def _sqt_key(value: Any) -> str:
+    number = parse_number(value)
+    if number is not None:
+        return str(int(number)) if float(number).is_integer() else format(number, "g")
+    return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
 def normalize_cargo(
@@ -888,10 +896,12 @@ class DailyImportService:
                     cell = expense_ws.cell(row_number, expense_map[name])
                     if change.action == "CREATE" or cell.value in (None, "") or name in (
                         "MD5",
+                        "Nơi đóng",
                         "Ngày cập nhật",
                     ):
                         cell.value = value
 
+            self._sync_expense_places(info_ws, expense_ws)
             self._format_workbook(wb)
             suffix = Path(daily_path).suffix or ".xlsx"
             temp_path = str(Path(daily_path).with_name(f".__daily_import_{os.getpid()}{suffix}"))
@@ -1127,14 +1137,7 @@ class DailyImportService:
     def _scale_target_options(
         self, rows: Sequence[_TargetInfoRow], scale: ExtractedRow
     ) -> List[_TargetInfoRow]:
-        group = self._target_group(rows, scale.close_date, scale.container)
-        if not group:
-            return []
-        if scale.cargo and any(row.cargo for row in group):
-            return [
-                row for row in group if _key_text(row.cargo) == _key_text(scale.cargo)
-            ]
-        return group
+        return self._target_group(rows, scale.close_date, scale.container)
 
     @staticmethod
     def _distinct_bills(rows: Iterable[ExtractedRow]) -> List[ExtractedRow]:
@@ -1319,6 +1322,8 @@ class DailyImportService:
                 )
                 continue
             sqt = next(iter(sqt_values))
+            target = next((row for row in matches if row.sqt == sqt), None)
+            target_values = target.values if target else {}
             check_status = (
                 "Cần kiểm tra" if self._source_needs_review(expense) else "OK"
             )
@@ -1342,6 +1347,7 @@ class DailyImportService:
                 "SQT PM": sqt,
                 "Ngày tháng": excel_date(expense.close_date),
                 "Số Container": expense.container,
+                "Nơi đóng": target_values.get("Nơi đóng"),
                 "Số HĐ": expense.invoice_no,
                 "Giá vật liệu": expense.material_price,
                 "Đơn giá": expense.unit_price,
@@ -1389,7 +1395,11 @@ class DailyImportService:
 
     def _validate_daily_headers(self, ws, expected: Sequence[str]) -> Dict[str, int]:
         mapping = self._header_map(ws)
-        auto_addable = {"Biển số xe", "Ngày nhập cuối", "Ngày cập nhật", "MD5"}
+        auto_addable = {"Ngày nhập cuối", "Ngày cập nhật", "MD5"}
+        if ws.title == INFO_SHEET:
+            auto_addable.add("Biển số xe")
+        elif ws.title == EXPENSE_SHEET:
+            auto_addable.add("Nơi đóng")
         missing = [
             name
             for name in expected
@@ -1412,6 +1422,8 @@ class DailyImportService:
             self._validate_daily_headers(ws, expected)
             if sheet_name == INFO_SHEET:
                 self._ensure_column(ws, "Biển số xe", before_header="Số chì/Seal")
+            if sheet_name == EXPENSE_SHEET:
+                self._ensure_column(ws, "Nơi đóng", before_header="Số HĐ")
             self._ensure_column(ws, "Trạng thái nhập")
             self._ensure_column(ws, "Ngày cập nhật", before_header="MD5")
             if sheet_name == INFO_SHEET:
@@ -1425,6 +1437,34 @@ class DailyImportService:
                     f"Không nâng cấp được sheet '{sheet_name}': "
                     + ", ".join(missing_after)
                 )
+
+    def _sync_expense_places(self, info_ws, expense_ws) -> None:
+        info_map = self._header_map(info_ws)
+        expense_map = self._header_map(expense_ws)
+        if not all(name in info_map for name in ("SQT PM", "Nơi đóng")):
+            return
+        if not all(name in expense_map for name in ("SQT PM", "Nơi đóng")):
+            return
+
+        place_by_sqt: Dict[str, Any] = {}
+        duplicate_sqt: set[str] = set()
+        for row_number in range(2, info_ws.max_row + 1):
+            sqt = _sqt_key(info_ws.cell(row_number, info_map["SQT PM"]).value)
+            if not sqt:
+                continue
+            if sqt in place_by_sqt:
+                duplicate_sqt.add(sqt)
+                continue
+            place_by_sqt[sqt] = info_ws.cell(row_number, info_map["Nơi đóng"]).value
+
+        for sqt in duplicate_sqt:
+            place_by_sqt.pop(sqt, None)
+
+        for row_number in range(2, expense_ws.max_row + 1):
+            sqt = _sqt_key(expense_ws.cell(row_number, expense_map["SQT PM"]).value)
+            if not sqt or sqt not in place_by_sqt:
+                continue
+            expense_ws.cell(row_number, expense_map["Nơi đóng"]).value = place_by_sqt[sqt]
 
     def _ensure_column(
         self,

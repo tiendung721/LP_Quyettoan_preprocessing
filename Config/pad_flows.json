@@ -19,7 +19,7 @@
   },
   "input_expense": {
     "workflow_name": "Test - nhập khoản chi",
-    "workflow_id": "",
+    "workflow_id": "896ed858-d835-47a6-ace3-0ccad8c0d90c",
     "environment_id": "",
     "autologin": false,
     "input_arguments_enabled": false,
