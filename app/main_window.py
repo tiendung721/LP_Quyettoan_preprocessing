@@ -575,7 +575,7 @@ class MainWindow(QMainWindow):
         )
         guide4.addWidget(self._guide_label(
             "Tạo Số QT mới sẽ gọi riêng flow PAD tạo mới và không đọc Excel. Nhập thông tin sẽ đọc "
-            "sheet Thong_Tin_Quyet_Toan; Nhập khoản chi sẽ đọc sheet Khoan_Chi. Cả hai đều cho "
+            "các sheet Tháng; Nhập khoản chi sẽ đọc sheet Khoan_Chi. Cả hai đều cho "
             "chọn một hoặc nhiều SQT rồi ghi JSON tạm cho PAD."
         ))
         self.lbl_rpa_status = QLabel("Chưa chạy luồng RPA trong phiên này.")
@@ -662,7 +662,7 @@ class MainWindow(QMainWindow):
                 self._browse_input_expense_bat,
             ),
             ("Thư mục output:", self.edit_output, self._browse_output),
-            ("File theo dõi hàng ngày trong output:", self.edit_daily, None),
+            ("File theo dõi hàng ngày:", self.edit_daily, self._browse_daily_file),
         ]
         for r, (label, edit, handler) in enumerate(rows):
             lbl = QLabel(label)
@@ -1075,9 +1075,33 @@ class MainWindow(QMainWindow):
         if path:
             output_folder = os.path.normpath(path)
             self.edit_output.setText(output_folder)
-            self.edit_daily.setText(
-                os.path.join(output_folder, os.path.basename(self.config.daily_tracking_file))
+            current_daily_name = (
+                os.path.basename(self.edit_daily.text().strip())
+                or os.path.basename(self.config.daily_tracking_file)
             )
+            self.edit_daily.setText(
+                os.path.join(output_folder, current_daily_name)
+            )
+
+    def _browse_daily_file(self) -> None:
+        current_daily = self.edit_daily.text().strip()
+        start_dir = (
+            os.path.dirname(current_daily)
+            if current_daily
+            else self.edit_output.text().strip()
+        )
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Chọn file theo dõi hàng ngày",
+            start_dir,
+            "Excel (*.xlsx *.xlsm);;Tất cả (*.*)",
+        )
+        if path:
+            daily_path = os.path.normpath(path)
+            self.edit_daily.setText(daily_path)
+            daily_dir = os.path.dirname(daily_path)
+            if daily_dir:
+                self.edit_output.setText(daily_dir)
 
     def on_save_config(self) -> None:
         try:
@@ -1094,7 +1118,10 @@ class MainWindow(QMainWindow):
                 "pad_input_expense_bat_path",
                 self.edit_input_expense_bat.text().strip(),
             )
-            self.config.set_output_folder(self.edit_output.text().strip())
+            self.config.set_output_folder(
+                self.edit_output.text().strip(),
+                daily_tracking_file=self.edit_daily.text().strip(),
+            )
             self.edit_output.setText(self.config.output_folder)
             self.edit_daily.setText(self.config.daily_tracking_file)
             self.config.ensure_folders()
@@ -1718,6 +1745,9 @@ class MainWindow(QMainWindow):
                 "Vui lòng chọn ít nhất một Số quyết toán.",
             )
             return
+        selected_items = (
+            dialog.selected_items() if operation == SELECTION_OPERATION else None
+        )
 
         try:
             json_path = write_selection_json(
@@ -1726,6 +1756,7 @@ class MainWindow(QMainWindow):
                 selected_sqt,
                 sheet_name=sheet_name,
                 operation=operation,
+                selected_items=selected_items,
             )
         except SelectionJsonWriteError as exc:
             self.logger.exception("Không ghi được JSON lựa chọn SQT.")

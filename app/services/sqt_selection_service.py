@@ -14,7 +14,7 @@ from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 
 from .. import file_utils
-from ..daily_import import INFO_SHEET
+from ..daily_import import INFO_SHEET, is_month_info_sheet
 
 SQT_COLUMN = "SQT PM"
 SELECTION_OPERATION = "NHAP_THONG_TIN"
@@ -53,10 +53,22 @@ class SelectionJsonWriteError(SqtSelectionError):
 class SqtSelectionItem:
     value: str
     row_count: int
+    sheet_name: str = ""
+    row_numbers: tuple[int, ...] = ()
 
     @property
     def display_text(self) -> str:
+        if self.sheet_name:
+            return f"{self.value} — {self.row_count} dòng — {self.sheet_name}"
         return f"{self.value} — {self.row_count} dòng"
+
+    def to_selection_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"sqt": self.value}
+        if self.sheet_name:
+            payload["sheet_name"] = self.sheet_name
+        if self.row_numbers:
+            payload["row_numbers"] = list(self.row_numbers)
+        return payload
 
 
 def normalize_sqt_value(value: Any) -> str:
@@ -92,6 +104,16 @@ def _header_map(ws) -> dict[str, int]:
     }
 
 
+def _info_sheet_names(wb, requested_sheet: str) -> list[str]:
+    if requested_sheet in wb.sheetnames:
+        return [requested_sheet]
+    if requested_sheet == INFO_SHEET:
+        monthly = [name for name in wb.sheetnames if is_month_info_sheet(name)]
+        if monthly:
+            return monthly
+    raise MissingSheetError(f"Không tìm thấy sheet “{requested_sheet}”.")
+
+
 def read_sqt_items(daily_file: str, sheet_name: str = INFO_SHEET) -> List[SqtSelectionItem]:
     """Read unique SQT values in first-seen order and count source rows."""
     if not daily_file or not os.path.isfile(daily_file):
@@ -108,32 +130,44 @@ def read_sqt_items(daily_file: str, sheet_name: str = INFO_SHEET) -> List[SqtSel
     wb = None
     try:
         wb = load_workbook(daily_file, read_only=True, data_only=True)
-        if sheet_name not in wb.sheetnames:
-            raise MissingSheetError(f"Không tìm thấy sheet “{sheet_name}”.")
+        sheet_names = _info_sheet_names(wb, sheet_name)
 
-        ws = wb[sheet_name]
-        headers = _header_map(ws)
-        if SQT_COLUMN not in headers:
-            raise MissingColumnError(
-                f"Không tìm thấy cột “{SQT_COLUMN}” trong sheet “{sheet_name}”."
-            )
+        counts: "OrderedDict[tuple[str, str], list[int]]" = OrderedDict()
+        for current_sheet in sheet_names:
+            ws = wb[current_sheet]
+            headers = _header_map(ws)
+            if SQT_COLUMN not in headers:
+                raise MissingColumnError(
+                    f"Không tìm thấy cột “{SQT_COLUMN}” trong sheet “{current_sheet}”."
+                )
 
-        sqt_col = headers[SQT_COLUMN]
-        counts: "OrderedDict[str, int]" = OrderedDict()
-        for row in ws.iter_rows(
-            min_row=2,
-            min_col=sqt_col,
-            max_col=sqt_col,
-            values_only=True,
-        ):
-            sqt = normalize_sqt_value(row[0] if row else None)
-            if not sqt:
-                continue
-            counts[sqt] = counts.get(sqt, 0) + 1
+            sqt_col = headers[SQT_COLUMN]
+            for row_number, row in enumerate(
+                ws.iter_rows(
+                    min_row=2,
+                    min_col=sqt_col,
+                    max_col=sqt_col,
+                    values_only=True,
+                ),
+                start=2,
+            ):
+                sqt = normalize_sqt_value(row[0] if row else None)
+                if not sqt:
+                    continue
+                key = (current_sheet if len(sheet_names) > 1 else "", sqt)
+                counts.setdefault(key, []).append(row_number)
 
         if not counts:
             raise EmptySqtListError("Sheet không có SQT hợp lệ.")
-        return [SqtSelectionItem(value=sqt, row_count=count) for sqt, count in counts.items()]
+        return [
+            SqtSelectionItem(
+                value=sqt,
+                row_count=len(row_numbers),
+                sheet_name=sheet,
+                row_numbers=tuple(row_numbers),
+            )
+            for (sheet, sqt), row_numbers in counts.items()
+        ]
     except SqtSelectionError:
         raise
     except PermissionError as exc:
@@ -157,6 +191,7 @@ def write_selection_json(
     sheet_name: str = INFO_SHEET,
     *,
     operation: str = SELECTION_OPERATION,
+    selected_items: Iterable[SqtSelectionItem] | None = None,
 ) -> str:
     """Write the selected SQT list atomically for PAD to consume."""
     selected = [str(value) for value in selected_sqt if str(value).strip()]
@@ -175,6 +210,14 @@ def write_selection_json(
         "sheet_name": sheet_name,
         "selected_sqt": selected,
     }
+    item_payloads = [
+        item.to_selection_payload()
+        for item in (selected_items or [])
+        if item.value in selected
+    ]
+    if item_payloads and operation == SELECTION_OPERATION:
+        payload["mode"] = "monthly_info"
+        payload["selected_items"] = item_payloads
 
     temp_path = target.with_name(target.name + ".tmp")
     try:

@@ -61,6 +61,19 @@ INFO_HEADERS = [
     "MD5",
 ]
 
+INFO_TECHNICAL_HEADERS = {
+    "Trạng thái nhập",
+    "Ngày nhập cuối",
+    "Ngày cập nhật",
+    "MD5",
+}
+
+INFO_HEADER_ALIASES = {
+    "Số chì": "Số chì/Seal",
+    "Hóa Đơn": "Hóa Đơn quyết toán",
+    "Mã MD5": "MD5",
+}
+
 EXPENSE_HEADERS = [
     "SQT PM",
     "Ngày tháng",
@@ -97,6 +110,7 @@ STATE_IGNORED = "IGNORED"
 REASON_NO_TARGET = "Không tìm thấy dòng quyết toán tương ứng"
 REASON_MANY_TARGETS = "Khớp nhiều dòng quyết toán, chưa rõ SQT nào"
 REASON_MANY_BILLS = "Container có nhiều Bill, chưa rõ Bill nào đúng"
+REASON_NO_MONTH = "Không xác định được tháng ghi file do thiếu Ngày Đóng"
 
 _ACCENTED_VIETNAMESE = re.compile(
     r"[ÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬÈÉẺẼẸÊỀẾỂỄỆÌÍỈĨỊ"
@@ -184,6 +198,7 @@ class FieldConflict:
     field_name: str
     current_value: Any
     new_value: Any
+    target_sheet: str = ""
 
 
 @dataclass
@@ -196,6 +211,7 @@ class InfoChange:
     document_md5s: List[str]
     check_status: str = "OK"
     conflicts: List[FieldConflict] = field(default_factory=list)
+    target_sheet: str = ""
 
 
 @dataclass
@@ -253,6 +269,7 @@ class ImportSummary:
 
 @dataclass
 class _TargetInfoRow:
+    sheet_name: str
     row_number: int
     sqt: int
     close_date: Optional[str]
@@ -267,6 +284,8 @@ class _WorkbookSnapshot:
     expense_rows: List[Tuple[int, Dict[str, Any]]]
     target_md5: set[str]
     max_sqt: int
+    info_sheet_names: List[str] = field(default_factory=list)
+    monthly_info: bool = False
 
 
 def _strip_accents(value: str) -> str:
@@ -277,6 +296,40 @@ def _strip_accents(value: str) -> str:
 def _key_text(value: Any) -> str:
     text = _strip_accents(str(value or "")).upper().replace("Đ", "D")
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _canonical_header(value: Any) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return ""
+    alias_by_key = {_key_text(key): target for key, target in INFO_HEADER_ALIASES.items()}
+    return alias_by_key.get(_key_text(text), text)
+
+
+def month_sheet_number(sheet_name: str) -> Optional[int]:
+    match = re.fullmatch(r"THANG\s*(\d{1,2})", _key_text(sheet_name))
+    if not match:
+        return None
+    month = int(match.group(1))
+    return month if 1 <= month <= 12 else None
+
+
+def is_month_info_sheet(sheet_name: str) -> bool:
+    return month_sheet_number(sheet_name) is not None
+
+
+def month_sheet_name(month: int) -> str:
+    return f"Tháng {month}"
+
+
+def month_sheet_name_for_date(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        return None
+    return month_sheet_name(parsed.month)
 
 
 def normalize_container(value: Any) -> str:
@@ -691,6 +744,16 @@ class DailyImportService:
             selected_bill = candidates[0] if candidates else None
             target = target_options[0] if target_options else None
             fallback = target.values if target else {}
+            target_sheet = (
+                target.sheet_name
+                if target
+                else self._target_info_sheet(snapshot, scale.close_date)
+            )
+            if not target_sheet:
+                self._mark_unmatched(analysis, scale, REASON_NO_MONTH)
+                if selected_bill:
+                    self._mark_unmatched(analysis, selected_bill, REASON_NO_MONTH)
+                continue
             sqt = target.sqt if target else next_sqt
             action = "UPDATE" if target else "CREATE"
             if not target:
@@ -733,6 +796,7 @@ class DailyImportService:
                     document_md5s=md5_values,
                     check_status=check_status,
                     conflicts=conflicts,
+                    target_sheet=target_sheet,
                 )
             )
             analysis.pending_states[scale.staged_id] = (STATE_READY, "")
@@ -740,6 +804,7 @@ class DailyImportService:
             if action == "CREATE":
                 virtual_rows.append(
                     _TargetInfoRow(
+                        sheet_name=target_sheet,
                         row_number=0,
                         sqt=sqt,
                         close_date=scale.close_date,
@@ -777,6 +842,14 @@ class DailyImportService:
                 self._mark_unmatched(analysis, selected_bill, REASON_MANY_TARGETS)
                 continue
             target = target_rows[0] if target_rows else None
+            target_sheet = (
+                target.sheet_name
+                if target
+                else self._target_info_sheet(snapshot, selected_bill.close_date)
+            )
+            if not target_sheet:
+                self._mark_unmatched(analysis, selected_bill, REASON_NO_MONTH)
+                continue
             action = "UPDATE" if target else "CREATE"
             sqt = target.sqt if target else next_sqt
             if not target:
@@ -795,11 +868,13 @@ class DailyImportService:
                     document_md5s=[self._real_md5(selected_bill)],
                     check_status="OK",
                     conflicts=conflicts,
+                    target_sheet=target_sheet,
                 )
             )
             if action == "CREATE":
                 virtual_rows.append(
                     _TargetInfoRow(
+                        sheet_name=target_sheet,
                         row_number=0,
                         sqt=sqt,
                         close_date=selected_bill.close_date,
@@ -852,19 +927,31 @@ class DailyImportService:
         try:
             wb = load_workbook(daily_path)
             self._upgrade_workbook(wb)
-            info_ws = wb[INFO_SHEET]
             expense_ws = wb[EXPENSE_SHEET]
-            info_map = self._header_map(info_ws)
+            info_sheet_names = self._info_sheet_names(wb)
+            default_info_sheet = info_sheet_names[0] if info_sheet_names else INFO_SHEET
             expense_map = self._header_map(expense_ws)
 
             for change in analysis.info_changes:
+                sheet_name = change.target_sheet or default_info_sheet
+                if sheet_name not in wb.sheetnames and is_month_info_sheet(sheet_name):
+                    self._ensure_month_sheet(wb, sheet_name)
+                    self._upgrade_workbook(wb)
+                    expense_ws = wb[EXPENSE_SHEET]
+                    expense_map = self._header_map(expense_ws)
+                if sheet_name not in wb.sheetnames:
+                    raise DailyImportError(f"File theo dõi thiếu sheet '{sheet_name}'.")
+                info_ws = wb[sheet_name]
+                info_map = self._header_map(info_ws)
                 row_number = (
                     change.target_row
                     if change.action == "UPDATE" and change.target_row
-                    else info_ws.max_row + 1
+                    else self._last_data_row(info_ws) + 1
                 )
                 if change.action == "CREATE":
-                    self._copy_row_style(info_ws, max(2, info_ws.max_row), row_number)
+                    self._copy_row_style(
+                        info_ws, max(2, self._last_data_row(info_ws)), row_number
+                    )
                 conflict_by_field = {
                     conflict.field_name: conflict for conflict in change.conflicts
                 }
@@ -886,10 +973,12 @@ class DailyImportService:
                 row_number = (
                     change.target_row
                     if change.action == "UPDATE" and change.target_row
-                    else expense_ws.max_row + 1
+                    else self._last_data_row(expense_ws) + 1
                 )
                 if change.action == "CREATE":
-                    self._copy_row_style(expense_ws, max(2, expense_ws.max_row), row_number)
+                    self._copy_row_style(
+                        expense_ws, max(2, self._last_data_row(expense_ws)), row_number
+                    )
                 for name, value in change.values.items():
                     if name not in expense_map:
                         continue
@@ -901,7 +990,7 @@ class DailyImportService:
                     ):
                         cell.value = value
 
-            self._sync_expense_places(info_ws, expense_ws)
+            self._sync_expense_places(wb, expense_ws)
             self._format_workbook(wb)
             suffix = Path(daily_path).suffix or ".xlsx"
             temp_path = str(Path(daily_path).with_name(f".__daily_import_{os.getpid()}{suffix}"))
@@ -1060,60 +1149,88 @@ class DailyImportService:
         except Exception as exc:
             raise DailyImportError(f"Không đọc được file theo dõi hàng ngày: {exc}") from exc
         try:
-            for sheet_name in (INFO_SHEET, EXPENSE_SHEET):
-                if sheet_name not in wb.sheetnames:
-                    raise DailyImportError(
-                        f"File theo dõi thiếu sheet '{sheet_name}'."
-                    )
-            info_ws = wb[INFO_SHEET]
-            expense_ws = wb[EXPENSE_SHEET]
-            info_map = self._validate_daily_headers(info_ws, INFO_HEADERS)
-            expense_map = self._validate_daily_headers(expense_ws, EXPENSE_HEADERS)
+            info_sheet_names = self._info_sheet_names(wb)
+            if not info_sheet_names:
+                raise DailyImportError(
+                    f"File theo dõi thiếu sheet thông tin '{INFO_SHEET}' hoặc các sheet 'Tháng N'."
+                )
+            monthly_info = any(is_month_info_sheet(name) for name in info_sheet_names)
             info_rows: List[_TargetInfoRow] = []
             target_md5: set[str] = set()
             max_sqt = 0
-            for row_number in range(2, info_ws.max_row + 1):
-                values = {
-                    name: info_ws.cell(row_number, col).value
-                    for name, col in info_map.items()
-                }
-                if not any(value not in (None, "") for value in values.values()):
-                    continue
-                sqt_value = parse_number(values.get("SQT PM"))
-                sqt = int(sqt_value or 0)
-                max_sqt = max(max_sqt, sqt)
-                container = normalize_container(values.get("Số Container"))
-                cargo, _ = normalize_cargo(values.get("Loại hàng"), self.cargo_mappings)
-                info_rows.append(
-                    _TargetInfoRow(
-                        row_number=row_number,
-                        sqt=sqt,
-                        close_date=parse_date(values.get("Ngày Đóng")),
-                        container=container,
-                        cargo=cargo,
-                        values=values,
+            for sheet_name in info_sheet_names:
+                info_ws = wb[sheet_name]
+                info_map = self._validate_daily_headers(
+                    info_ws, INFO_HEADERS, info_sheet=True
+                )
+                for row_number, row_values in enumerate(
+                    info_ws.iter_rows(min_row=2, values_only=True),
+                    start=2,
+                ):
+                    values = {
+                        name: row_values[col - 1] if col - 1 < len(row_values) else None
+                        for name, col in info_map.items()
+                    }
+                    if not any(value not in (None, "") for value in values.values()):
+                        continue
+                    sqt_value = parse_number(values.get("SQT PM"))
+                    sqt = int(sqt_value or 0)
+                    max_sqt = max(max_sqt, sqt)
+                    container = normalize_container(values.get("Số Container"))
+                    cargo, _ = normalize_cargo(
+                        values.get("Loại hàng"), self.cargo_mappings
                     )
-                )
-                target_md5.update(
-                    normalize_md5(part)
-                    for part in re.split(r"[;,\n]+", str(_md5_cell_value(values) or ""))
-                    if normalize_md5(part)
-                )
+                    info_rows.append(
+                        _TargetInfoRow(
+                            sheet_name=sheet_name,
+                            row_number=row_number,
+                            sqt=sqt,
+                            close_date=parse_date(values.get("Ngày Đóng")),
+                            container=container,
+                            cargo=cargo,
+                            values=values,
+                        )
+                    )
+                    target_md5.update(
+                        normalize_md5(part)
+                        for part in re.split(
+                            r"[;,\n]+", str(_md5_cell_value(values) or "")
+                        )
+                        if normalize_md5(part)
+                    )
+
             expense_rows: List[Tuple[int, Dict[str, Any]]] = []
-            for row_number in range(2, expense_ws.max_row + 1):
-                values = {
-                    name: expense_ws.cell(row_number, col).value
-                    for name, col in expense_map.items()
-                }
-                if not any(value not in (None, "") for value in values.values()):
-                    continue
-                expense_rows.append((row_number, values))
-                target_md5.update(
-                    normalize_md5(part)
-                    for part in re.split(r"[;,\n]+", str(_md5_cell_value(values) or ""))
-                    if normalize_md5(part)
+            if EXPENSE_SHEET in wb.sheetnames:
+                expense_ws = wb[EXPENSE_SHEET]
+                expense_map = self._validate_daily_headers(
+                    expense_ws, EXPENSE_HEADERS, info_sheet=False
                 )
-            return _WorkbookSnapshot(info_rows, expense_rows, target_md5, max_sqt)
+                for row_number, row_values in enumerate(
+                    expense_ws.iter_rows(min_row=2, values_only=True),
+                    start=2,
+                ):
+                    values = {
+                        name: row_values[col - 1] if col - 1 < len(row_values) else None
+                        for name, col in expense_map.items()
+                    }
+                    if not any(value not in (None, "") for value in values.values()):
+                        continue
+                    expense_rows.append((row_number, values))
+                    target_md5.update(
+                        normalize_md5(part)
+                        for part in re.split(
+                            r"[;,\n]+", str(_md5_cell_value(values) or "")
+                        )
+                        if normalize_md5(part)
+                    )
+            return _WorkbookSnapshot(
+                info_rows,
+                expense_rows,
+                target_md5,
+                max_sqt,
+                info_sheet_names=info_sheet_names,
+                monthly_info=monthly_info,
+            )
         finally:
             wb.close()
 
@@ -1181,6 +1298,14 @@ class DailyImportService:
                 reason=reason,
             )
         )
+
+    @staticmethod
+    def _target_info_sheet(
+        snapshot: _WorkbookSnapshot, close_date: Optional[str]
+    ) -> Optional[str]:
+        if snapshot.monthly_info:
+            return month_sheet_name_for_date(close_date)
+        return snapshot.info_sheet_names[0] if snapshot.info_sheet_names else INFO_SHEET
 
     @staticmethod
     def _source_needs_review(*rows: Optional[ExtractedRow]) -> bool:
@@ -1285,7 +1410,10 @@ class DailyImportService:
             current_compare = parse_date(current) or _key_text(current)
             new_compare = parse_date(new_value) or _key_text(new_value)
             if current_compare != new_compare:
-                raw_id = f"{target.row_number}|{name}|{current}|{new_value}"
+                raw_id = (
+                    f"{target.sheet_name}|{target.row_number}|"
+                    f"{name}|{current}|{new_value}"
+                )
                 conflicts.append(
                     FieldConflict(
                         conflict_id=hashlib.sha1(raw_id.encode("utf-8")).hexdigest(),
@@ -1293,6 +1421,7 @@ class DailyImportService:
                         field_name=name,
                         current_value=current,
                         new_value=new_value,
+                        target_sheet=target.sheet_name,
                     )
                 )
         return conflicts
@@ -1381,24 +1510,37 @@ class DailyImportService:
     # Workbook helpers
     # ------------------------------------------------------------------ #
     @staticmethod
+    def _info_sheet_names(wb) -> List[str]:
+        monthly = [name for name in wb.sheetnames if is_month_info_sheet(name)]
+        if monthly:
+            return monthly
+        return [INFO_SHEET] if INFO_SHEET in wb.sheetnames else []
+
+    @staticmethod
     def _header_map(ws) -> Dict[str, int]:
-        mapping = {
-            str(ws.cell(1, col).value): col
-            for col in range(1, ws.max_column + 1)
-            if ws.cell(1, col).value not in (None, "")
-        }
+        mapping: Dict[str, int] = {}
+        for col in range(1, ws.max_column + 1):
+            value = ws.cell(1, col).value
+            if value in (None, ""):
+                continue
+            raw = re.sub(r"\s+", " ", str(value)).strip()
+            canonical = _canonical_header(raw)
+            mapping[raw] = col
+            mapping[canonical] = col
         if "MD5" not in mapping and "Mã MD5" in mapping:
             mapping["MD5"] = mapping["Mã MD5"]
         if "Mã MD5" not in mapping and "MD5" in mapping:
             mapping["Mã MD5"] = mapping["MD5"]
         return mapping
 
-    def _validate_daily_headers(self, ws, expected: Sequence[str]) -> Dict[str, int]:
+    def _validate_daily_headers(
+        self, ws, expected: Sequence[str], *, info_sheet: bool
+    ) -> Dict[str, int]:
         mapping = self._header_map(ws)
-        auto_addable = {"Ngày nhập cuối", "Ngày cập nhật", "MD5"}
-        if ws.title == INFO_SHEET:
-            auto_addable.add("Biển số xe")
-        elif ws.title == EXPENSE_SHEET:
+        auto_addable = {"Ngày nhập cuối", "Ngày cập nhật", "MD5", "Trạng thái nhập"}
+        if info_sheet:
+            auto_addable.update({"Biển số xe", "Lô SX", "Dự kiến giao"})
+        else:
             auto_addable.add("Nơi đóng")
         missing = [
             name
@@ -1412,59 +1554,161 @@ class DailyImportService:
         return mapping
 
     def _upgrade_workbook(self, wb) -> None:
-        for sheet_name, expected in (
-            (INFO_SHEET, INFO_HEADERS),
-            (EXPENSE_SHEET, EXPENSE_HEADERS),
-        ):
-            if sheet_name not in wb.sheetnames:
-                raise DailyImportError(f"File theo dõi thiếu sheet '{sheet_name}'.")
-            ws = wb[sheet_name]
-            self._validate_daily_headers(ws, expected)
-            if sheet_name == INFO_SHEET:
-                self._ensure_column(ws, "Biển số xe", before_header="Số chì/Seal")
-            if sheet_name == EXPENSE_SHEET:
-                self._ensure_column(ws, "Nơi đóng", before_header="Số HĐ")
-            self._ensure_column(ws, "Trạng thái nhập")
-            self._ensure_column(ws, "Ngày cập nhật", before_header="MD5")
-            if sheet_name == INFO_SHEET:
-                self._ensure_column(ws, "Ngày nhập cuối", before_header="Ngày cập nhật")
-            if "MD5" not in self._header_map(ws):
-                self._ensure_column(ws, "MD5")
-            mapping = self._header_map(ws)
-            missing_after = [name for name in expected if name not in mapping]
-            if missing_after:
-                raise DailyImportError(
-                    f"Không nâng cấp được sheet '{sheet_name}': "
-                    + ", ".join(missing_after)
-                )
+        info_sheet_names = self._info_sheet_names(wb)
+        if not info_sheet_names:
+            raise DailyImportError(
+                f"File theo dõi thiếu sheet thông tin '{INFO_SHEET}' hoặc các sheet 'Tháng N'."
+            )
+        for sheet_name in info_sheet_names:
+            self._upgrade_info_sheet(wb[sheet_name])
 
-    def _sync_expense_places(self, info_ws, expense_ws) -> None:
-        info_map = self._header_map(info_ws)
+        if EXPENSE_SHEET not in wb.sheetnames:
+            expense_ws = wb.create_sheet(EXPENSE_SHEET)
+            expense_ws.append(EXPENSE_HEADERS + ["Ngày nhập cuối"])
+        self._upgrade_expense_sheet(wb[EXPENSE_SHEET])
+
+    def _upgrade_info_sheet(self, ws) -> None:
+        self._canonicalize_headers(ws)
+        self._validate_daily_headers(ws, INFO_HEADERS, info_sheet=True)
+        if "Biển số xe" not in self._header_map(ws):
+            if not self._use_blank_header(ws, "Biển số xe", before_header="Số chì/Seal"):
+                self._ensure_column(ws, "Biển số xe", before_header="Số chì/Seal")
+        if "Lô SX" not in self._header_map(ws):
+            self._ensure_column(ws, "Lô SX", before_header="Số tấn")
+        if "Dự kiến giao" not in self._header_map(ws):
+            if not self._use_blank_header(ws, "Dự kiến giao", before_header="Người nhận"):
+                if not self._use_blank_header(ws, "Dự kiến giao", after_header="Ngày chạy"):
+                    self._ensure_column(ws, "Dự kiến giao", before_header="Người nhận")
+        self._ensure_column(ws, "Trạng thái nhập")
+        self._ensure_column(ws, "Ngày cập nhật", before_header="MD5")
+        self._ensure_column(ws, "Ngày nhập cuối", before_header="Ngày cập nhật")
+        if "MD5" not in self._header_map(ws):
+            self._ensure_column(ws, "MD5")
+        self._validate_upgraded_headers(ws, INFO_HEADERS)
+        if is_month_info_sheet(ws.title):
+            self._hide_columns(ws, INFO_TECHNICAL_HEADERS)
+
+    def _upgrade_expense_sheet(self, ws) -> None:
+        self._canonicalize_headers(ws)
+        self._validate_daily_headers(ws, EXPENSE_HEADERS, info_sheet=False)
+        self._ensure_column(ws, "Nơi đóng", before_header="Số HĐ")
+        self._ensure_column(ws, "Trạng thái nhập")
+        self._ensure_column(ws, "Ngày cập nhật", before_header="MD5")
+        if "MD5" not in self._header_map(ws):
+            self._ensure_column(ws, "MD5")
+        self._validate_upgraded_headers(ws, EXPENSE_HEADERS)
+
+    def _validate_upgraded_headers(self, ws, expected: Sequence[str]) -> None:
+        mapping = self._header_map(ws)
+        missing_after = [name for name in expected if name not in mapping]
+        if missing_after:
+            raise DailyImportError(
+                f"Không nâng cấp được sheet '{ws.title}': "
+                + ", ".join(missing_after)
+            )
+
+    def _sync_expense_places(self, wb, expense_ws) -> None:
         expense_map = self._header_map(expense_ws)
-        if not all(name in info_map for name in ("SQT PM", "Nơi đóng")):
-            return
         if not all(name in expense_map for name in ("SQT PM", "Nơi đóng")):
             return
 
         place_by_sqt: Dict[str, Any] = {}
         duplicate_sqt: set[str] = set()
-        for row_number in range(2, info_ws.max_row + 1):
-            sqt = _sqt_key(info_ws.cell(row_number, info_map["SQT PM"]).value)
-            if not sqt:
+        for sheet_name in self._info_sheet_names(wb):
+            info_ws = wb[sheet_name]
+            info_map = self._header_map(info_ws)
+            if not all(name in info_map for name in ("SQT PM", "Nơi đóng")):
                 continue
-            if sqt in place_by_sqt:
-                duplicate_sqt.add(sqt)
-                continue
-            place_by_sqt[sqt] = info_ws.cell(row_number, info_map["Nơi đóng"]).value
+            for row_number in range(2, self._last_data_row(info_ws) + 1):
+                sqt = _sqt_key(info_ws.cell(row_number, info_map["SQT PM"]).value)
+                if not sqt:
+                    continue
+                place = info_ws.cell(row_number, info_map["Nơi đóng"]).value
+                if sqt in place_by_sqt and place_by_sqt[sqt] != place:
+                    duplicate_sqt.add(sqt)
+                    continue
+                place_by_sqt[sqt] = place
 
         for sqt in duplicate_sqt:
             place_by_sqt.pop(sqt, None)
 
-        for row_number in range(2, expense_ws.max_row + 1):
+        for row_number in range(2, self._last_data_row(expense_ws) + 1):
             sqt = _sqt_key(expense_ws.cell(row_number, expense_map["SQT PM"]).value)
             if not sqt or sqt not in place_by_sqt:
                 continue
             expense_ws.cell(row_number, expense_map["Nơi đóng"]).value = place_by_sqt[sqt]
+
+    def _canonicalize_headers(self, ws) -> None:
+        for col in range(1, ws.max_column + 1):
+            value = ws.cell(1, col).value
+            if value in (None, ""):
+                continue
+            canonical = _canonical_header(value)
+            if canonical and canonical != str(value).strip():
+                ws.cell(1, col).value = canonical
+
+    def _use_blank_header(
+        self,
+        ws,
+        header: str,
+        *,
+        before_header: Optional[str] = None,
+        after_header: Optional[str] = None,
+    ) -> bool:
+        mapping = self._header_map(ws)
+        candidates: List[int] = []
+        if before_header and before_header in mapping:
+            candidates.append(mapping[before_header] - 1)
+        if after_header and after_header in mapping:
+            candidates.append(mapping[after_header] + 1)
+        for col in candidates:
+            if col < 1 or col > ws.max_column:
+                continue
+            if ws.cell(1, col).value in (None, ""):
+                ws.cell(1, col).value = header
+                return True
+        return False
+
+    @staticmethod
+    def _hide_columns(ws, headers: Iterable[str]) -> None:
+        mapping = DailyImportService._header_map(ws)
+        for header in headers:
+            if header not in mapping:
+                continue
+            ws.column_dimensions[get_column_letter(mapping[header])].hidden = True
+
+    def _ensure_month_sheet(self, wb, sheet_name: str) -> None:
+        if sheet_name in wb.sheetnames:
+            return
+        target_month = month_sheet_number(sheet_name)
+        if target_month is None:
+            raise DailyImportError(f"Tên sheet tháng không hợp lệ: {sheet_name}")
+        existing = [
+            (month_sheet_number(name) or 0, name)
+            for name in wb.sheetnames
+            if is_month_info_sheet(name)
+        ]
+        if not existing:
+            raise DailyImportError("Không có sheet tháng nào để làm mẫu tạo tháng mới.")
+        _, source_name = min(
+            existing,
+            key=lambda item: (abs(item[0] - target_month), item[0] > target_month),
+        )
+        ws = wb.copy_worksheet(wb[source_name])
+        ws.title = sheet_name
+        if ws.max_row > 1:
+            ws.delete_rows(2, ws.max_row - 1)
+        self._upgrade_info_sheet(ws)
+
+    @staticmethod
+    def _last_data_row(ws) -> int:
+        for row_number in range(ws.max_row, 1, -1):
+            if any(
+                ws.cell(row_number, col).value not in (None, "")
+                for col in range(1, ws.max_column + 1)
+            ):
+                return row_number
+        return 1
 
     def _ensure_column(
         self,
@@ -1503,11 +1747,15 @@ class DailyImportService:
             target.alignment = copy(source.alignment)
 
     def _format_workbook(self, wb) -> None:
-        for sheet_name in (INFO_SHEET, EXPENSE_SHEET):
+        sheet_names = self._info_sheet_names(wb)
+        if EXPENSE_SHEET in wb.sheetnames:
+            sheet_names.append(EXPENSE_SHEET)
+        for sheet_name in sheet_names:
             ws = wb[sheet_name]
             mapping = self._header_map(ws)
+            last_row = max(1, self._last_data_row(ws))
             ws.freeze_panes = "A2"
-            ws.auto_filter.ref = f"A1:{get_column_letter(ws.max_column)}{max(1, ws.max_row)}"
+            ws.auto_filter.ref = f"A1:{get_column_letter(ws.max_column)}{last_row}"
             # Form mới chỉ còn hai trạng thái nhập phục vụ PAD.
             ws.data_validations.dataValidation = []
             import_col = get_column_letter(mapping["Trạng thái nhập"])
@@ -1517,7 +1765,7 @@ class DailyImportService:
             ws.add_data_validation(import_validation)
             import_validation.add(f"{import_col}2:{import_col}10000")
             status_col = mapping["Trạng thái nhập"]
-            for row_number in range(2, ws.max_row + 1):
+            for row_number in range(2, last_row + 1):
                 if any(
                     ws.cell(row_number, col).value not in (None, "")
                     for col in range(1, ws.max_column + 1)
@@ -1529,42 +1777,51 @@ class DailyImportService:
                     )
             for header in ("Ngày Đóng", "Ngày chạy", "Ngày Giao", "Ngày tháng"):
                 if header in mapping:
-                    for row_number in range(2, ws.max_row + 1):
+                    for row_number in range(2, last_row + 1):
                         ws.cell(row_number, mapping[header]).number_format = "dd/mm/yyyy"
             for header in ("Ngày nhập cuối", "Ngày cập nhật"):
                 if header not in mapping:
                     continue
-                for row_number in range(2, ws.max_row + 1):
+                for row_number in range(2, last_row + 1):
                     ws.cell(row_number, mapping[header]).number_format = (
                         "dd/mm/yyyy hh:mm:ss"
                     )
             for header in ("Giá vật liệu", "Đơn giá", "Thành tiền", "VAT", "Tổng tiền"):
                 if header in mapping:
-                    for row_number in range(2, ws.max_row + 1):
+                    for row_number in range(2, last_row + 1):
                         ws.cell(row_number, mapping[header]).number_format = "#,##0"
             if "Số tấn" in mapping:
-                for row_number in range(2, ws.max_row + 1):
+                for row_number in range(2, last_row + 1):
                     ws.cell(row_number, mapping["Số tấn"]).number_format = "0.00"
+            if is_month_info_sheet(sheet_name):
+                self._hide_columns(ws, INFO_TECHNICAL_HEADERS)
             # Cập nhật bảng Excel nếu workbook cũ có Table.
             for table in ws.tables.values():
-                table.ref = f"A1:{get_column_letter(ws.max_column)}{max(2, ws.max_row)}"
+                table.ref = f"A1:{get_column_letter(ws.max_column)}{max(2, last_row)}"
 
     def _validate_saved_workbook(self, path: str) -> None:
         wb = load_workbook(path, read_only=True, data_only=False)
         try:
-            for sheet_name, expected in (
-                (INFO_SHEET, INFO_HEADERS),
-                (EXPENSE_SHEET, EXPENSE_HEADERS),
-            ):
-                if sheet_name not in wb.sheetnames:
-                    raise DailyImportError(f"File tạm thiếu sheet '{sheet_name}'.")
+            info_sheet_names = self._info_sheet_names(wb)
+            if not info_sheet_names:
+                raise DailyImportError("File tạm thiếu sheet thông tin.")
+            for sheet_name in info_sheet_names:
                 mapping = self._header_map(wb[sheet_name])
-                missing = [name for name in expected if name not in mapping]
+                missing = [name for name in INFO_HEADERS if name not in mapping]
                 if missing:
                     raise DailyImportError(
                         f"File tạm thiếu cột ở sheet '{sheet_name}': "
                         + ", ".join(missing)
                     )
+            if EXPENSE_SHEET not in wb.sheetnames:
+                raise DailyImportError(f"File tạm thiếu sheet '{EXPENSE_SHEET}'.")
+            mapping = self._header_map(wb[EXPENSE_SHEET])
+            missing = [name for name in EXPENSE_HEADERS if name not in mapping]
+            if missing:
+                raise DailyImportError(
+                    f"File tạm thiếu cột ở sheet '{EXPENSE_SHEET}': "
+                    + ", ".join(missing)
+                )
         finally:
             wb.close()
 

@@ -62,6 +62,74 @@ class AppConfigSingleOutputTests(unittest.TestCase):
             self.assertFalse((root / "Outputs").exists())
             self.assertFalse((root / "Daily").exists())
 
+    def test_set_output_folder_keeps_user_selected_daily_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = AppConfig(
+                {
+                    "app_root": str(root),
+                    "output_folder": str(root / "output"),
+                    "daily_tracking_file": str(root / "output" / DAILY_TRACKING_FILENAME),
+                },
+                str(root / "Config" / "settings.json"),
+            )
+
+            selected_daily = root / "output" / "Hàng ngày 2026.xlsx"
+            config.set_output_folder(
+                str(root / "output"),
+                daily_tracking_file=str(selected_daily),
+            )
+
+            self.assertTrue(
+                _same_path(config.daily_tracking_file, str(selected_daily))
+            )
+
+    def test_set_output_folder_preserves_user_selected_daily_path_outside_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "app"
+            external_daily = Path(tmp) / "Downloads" / "Hàng ngày 2026.xlsx"
+            config = AppConfig(
+                {
+                    "app_root": str(root),
+                    "output_folder": str(root / "output"),
+                    "daily_tracking_file": str(root / "output" / DAILY_TRACKING_FILENAME),
+                },
+                str(root / "Config" / "settings.json"),
+            )
+
+            config.set_output_folder(
+                str(root / "output"),
+                daily_tracking_file=str(external_daily),
+            )
+
+            self.assertTrue(
+                _same_path(config.daily_tracking_file, str(external_daily))
+            )
+
+    def test_load_preserves_daily_path_outside_app_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "app"
+            external_daily = Path(tmp) / "Downloads" / "Hàng ngày 2026.xlsx"
+            config_path = root / "Config" / "settings.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "app_root": str(root),
+                        "output_folder": str(root / "output"),
+                        "daily_tracking_file": str(external_daily),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            config = AppConfig.load(str(config_path))
+
+            self.assertTrue(
+                _same_path(config.daily_tracking_file, str(external_daily))
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

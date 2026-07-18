@@ -1,8 +1,17 @@
 {
-  "operation": "NHAP_KHOAN_CHI",
+  "operation": "NHAP_THONG_TIN",
   "daily_file": "C:\\Users\\Admin\\Desktop\\test\\quyettoan_pm_project\\output\\quyet_toan_hang_ngay.xlsx",
-  "sheet_name": "Khoan_Chi",
+  "sheet_name": "Thong_Tin_Quyet_Toan",
   "selected_sqt": [
-    "710"
+    "708"
+  ],
+  "mode": "monthly_info",
+  "selected_items": [
+    {
+      "sqt": "708",
+      "row_numbers": [
+        31
+      ]
+    }
   ]
 }

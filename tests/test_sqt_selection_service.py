@@ -38,6 +38,19 @@ class SqtSelectionServiceTests(unittest.TestCase):
         wb.save(self.daily)
         wb.close()
 
+    def _make_monthly_daily(self) -> None:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Tháng 7"
+        ws.append(["SQT PM", "Số Container"])
+        ws.append([716, "JULY1234567"])
+        ws.append([716, "JULY7654321"])
+        ws2 = wb.create_sheet("Tháng 8")
+        ws2.append(["SQT PM", "Số Container"])
+        ws2.append([717, "AUGU1234567"])
+        wb.save(self.daily)
+        wb.close()
+
     def test_normalize_sqt_value(self) -> None:
         self.assertEqual(normalize_sqt_value(596), "596")
         self.assertEqual(normalize_sqt_value(596.0), "596")
@@ -95,6 +108,39 @@ class SqtSelectionServiceTests(unittest.TestCase):
         self.assertNotIn("RPA_Queue", json.dumps(payload, ensure_ascii=False))
         self.assertNotIn("CREATE_NEW", json.dumps(payload, ensure_ascii=False))
         self.assertFalse(target.with_name(target.name + ".tmp").exists())
+
+    def test_read_monthly_info_items_and_write_selected_items(self) -> None:
+        self._make_monthly_daily()
+        target = self.root / "runtime" / "rpa_input_selection.json"
+
+        items = read_sqt_items(str(self.daily))
+        write_selection_json(
+            target,
+            str(self.daily),
+            ["716", "717"],
+            selected_items=items,
+        )
+
+        self.assertEqual(
+            [
+                (item.value, item.row_count, item.sheet_name, item.row_numbers)
+                for item in items
+            ],
+            [
+                ("716", 2, "Tháng 7", (2, 3)),
+                ("717", 1, "Tháng 8", (2,)),
+            ],
+        )
+        with open(target, encoding="utf-8") as f:
+            payload = json.load(f)
+        self.assertEqual(payload["mode"], "monthly_info")
+        self.assertEqual(
+            payload["selected_items"],
+            [
+                {"sqt": "716", "sheet_name": "Tháng 7", "row_numbers": [2, 3]},
+                {"sqt": "717", "sheet_name": "Tháng 8", "row_numbers": [2]},
+            ],
+        )
 
     def test_write_selection_json_supports_expense_operation(self) -> None:
         target = self.root / "runtime" / "rpa_input_selection.json"

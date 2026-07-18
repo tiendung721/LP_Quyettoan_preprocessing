@@ -29,6 +29,7 @@ class SelectSqtDialog(QDialog):
         self.items = list(items)
         self.checkboxes: List[QCheckBox] = []
         self._selected_values: List[str] = []
+        self._selected_items: List[SqtSelectionItem] = []
 
         self.setWindowTitle("Chọn Số quyết toán cần nhập")
         self.setModal(True)
@@ -101,16 +102,25 @@ class SelectSqtDialog(QDialog):
             if checkbox.isChecked()
         ]
 
+    def selected_items(self) -> List[SqtSelectionItem]:
+        if self._selected_items:
+            return list(self._selected_items)
+        return [
+            item
+            for item, checkbox in zip(self.items, self.checkboxes)
+            if checkbox.isChecked()
+        ]
+
     @Slot()
     def _on_run(self) -> None:
-        selected = self.selected_values()
-        if not selected:
+        selected_items = self.selected_items()
+        if not selected_items:
             QMessageBox.warning(
                 self,
                 "Chưa chọn SQT",
                 "Vui lòng chọn ít nhất một Số quyết toán.",
             )
             return
-        self._selected_values = selected
+        self._selected_items = selected_items
+        self._selected_values = [item.value for item in selected_items]
         self.accept()
-

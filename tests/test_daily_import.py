@@ -16,6 +16,7 @@ from app.daily_import import (
     INFO_SHEET,
     REASON_MANY_BILLS,
     REASON_MANY_TARGETS,
+    REASON_NO_MONTH,
     REASON_NO_TARGET,
     DailyImportError,
     DailyImportService,
@@ -80,6 +81,64 @@ class DailyImportServiceTests(unittest.TestCase):
         info.append([values[name] for name in LEGACY_INFO_HEADERS])
         expense = wb.create_sheet(EXPENSE_SHEET)
         expense.append(LEGACY_EXPENSE_HEADERS)
+        wb.save(self.daily)
+        wb.close()
+
+    def _make_monthly_daily(self, *, include_expense: bool = False) -> None:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Tháng 7"
+        ws.append(
+            [
+                "SQT PM",
+                "Ngày Đóng",
+                "Số Container",
+                None,
+                "Số chì",
+                "Lô SX",
+                "Số tấn",
+                "Loại hàng",
+                "Nơi đóng",
+                "Tên tàu",
+                "Ngày chạy",
+                None,
+                "Người nhận",
+                "VT biển",
+                "Vận chuyển",
+                "HD HP",
+                "HD HCM",
+                "Ngày Giao",
+                "Hóa Đơn",
+                "Ghi chú",
+            ]
+        )
+        ws.append(
+            [
+                716,
+                datetime(2026, 7, 31),
+                "JULY1234567",
+                None,
+                "SEAL716",
+                "",
+                28.5,
+                "Vôi rời",
+                "Kho tháng 7",
+                "TÀU T7",
+                datetime(2026, 8, 2),
+                "DNA",
+                "DNA",
+                "Hãng T7",
+                "PHB",
+                "",
+                "",
+                "",
+                "",
+                "",
+            ]
+        )
+        if include_expense:
+            expense = wb.create_sheet(EXPENSE_SHEET)
+            expense.append(LEGACY_EXPENSE_HEADERS)
         wb.save(self.daily)
         wb.close()
 
@@ -581,6 +640,88 @@ class DailyImportServiceTests(unittest.TestCase):
 
         self.service.commit(analysis)
         self.assertEqual(self._expense_sqt_column(), [])
+
+    def test_monthly_workbook_creates_next_month_sheet_and_global_sqt(self) -> None:
+        self._make_monthly_daily()
+        self._write_output_rows(
+            {
+                "file_nguon": "scale-aug.jpg",
+                "ma_md5_file": "scale-aug",
+                "loai_chung_tu": "Phiếu cân",
+                "ngay_dong": "05/08/2026",
+                "so_container": "AUGU1234567",
+                "so_tan": 29.5,
+                "loai_hang": "VOI ROI",
+                "noi_dong": "Kho tháng 8",
+                "do_tin_cay": "Cao",
+                "canh_bao": [],
+            }
+        )
+
+        analysis = self.service.analyze(str(self.output), str(self.daily), 1)
+
+        self.assertEqual(analysis.new_info_count, 1)
+        change = analysis.info_changes[0]
+        self.assertEqual(change.sqt, 717)
+        self.assertEqual(change.target_sheet, "Tháng 8")
+
+        self.service.commit(analysis)
+        wb = load_workbook(self.daily)
+        self.assertIn("Tháng 8", wb.sheetnames)
+        self.assertIn(EXPENSE_SHEET, wb.sheetnames)
+        ws = wb["Tháng 8"]
+        headers = {cell.value: cell.column for cell in ws[1] if cell.value}
+        self.assertIn("Số chì/Seal", headers)
+        self.assertIn("Hóa Đơn quyết toán", headers)
+        self.assertEqual(ws.cell(2, headers["SQT PM"]).value, 717)
+        self.assertEqual(ws.cell(2, headers["Số Container"]).value, "AUGU1234567")
+        self.assertTrue(
+            ws.column_dimensions[
+                ws.cell(1, headers["MD5"]).column_letter
+            ].hidden
+        )
+        wb.close()
+
+    def test_monthly_workbook_missing_close_date_is_unmatched(self) -> None:
+        self._make_monthly_daily()
+        self._write_output_rows(
+            {
+                "file_nguon": "scale-no-date.jpg",
+                "ma_md5_file": "scale-no-date",
+                "loai_chung_tu": "Phiếu cân",
+                "so_container": "NODT1234567",
+                "so_tan": 29.5,
+                "loai_hang": "VOI ROI",
+            }
+        )
+
+        analysis = self.service.analyze(str(self.output), str(self.daily), 1)
+
+        self.assertEqual(analysis.info_changes, [])
+        self.assertEqual(len(analysis.unmatched_rows), 1)
+        self.assertEqual(analysis.unmatched_rows[0].reason, REASON_NO_MONTH)
+
+    def test_expense_matches_info_from_monthly_sheets(self) -> None:
+        self._make_monthly_daily()
+        self._write_output_rows(
+            {
+                "file_nguon": "cost-monthly.jpg",
+                "ma_md5_file": "cost-monthly",
+                "loai_chung_tu": "Khoản chi",
+                "ngay_chay": "31/07/2026",
+                "so_container": "JULY1234567",
+                "so_hd": "T7",
+                "don_gia": 100,
+            }
+        )
+
+        analysis = self.service.analyze(str(self.output), str(self.daily), 1)
+
+        self.assertEqual(len(analysis.expense_changes), 1)
+        self.assertEqual(analysis.expense_changes[0].values["SQT PM"], 716)
+        self.assertEqual(analysis.expense_changes[0].values["Nơi đóng"], "Kho tháng 7")
+        self.service.commit(analysis)
+        self.assertEqual(self._expense_sqt_column(), [716])
 
     # ------------------------------------------------------------------ #
     def _append_info_row(

@@ -54,6 +54,25 @@ def _is_legacy_split_folder(path: str, app_root: str) -> bool:
     return resolved == os.path.normcase(os.path.join(root, "download"))
 
 
+def _is_inside_path(path: str, parent: str) -> bool:
+    try:
+        resolved = os.path.normcase(os.path.abspath(path))
+        root = os.path.normcase(os.path.abspath(parent))
+        return os.path.commonpath([resolved, root]) == root
+    except (OSError, ValueError):
+        return False
+
+
+def _should_migrate_daily_path(path: str, app_root: str) -> bool:
+    if not path:
+        return True
+    parent = os.path.dirname(path)
+    if not _is_inside_path(parent, app_root):
+        return False
+    name = os.path.basename(os.path.abspath(parent)).lower()
+    return name in {"download", "downloads", "outputs", "daily"}
+
+
 def normalize_single_output_settings(data: Dict[str, Any]) -> Dict[str, Any]:
     """Ép các đường dẫn dữ liệu về một thư mục làm việc duy nhất."""
     app_root = data.get("app_root") or DEFAULT_APP_ROOT
@@ -69,11 +88,11 @@ def normalize_single_output_settings(data: Dict[str, Any]) -> Dict[str, Any]:
     output_folder = os.path.normpath(output_folder)
 
     daily_path = data.get("daily_tracking_file") or ""
-    if daily_path:
-        daily_name = os.path.basename(daily_path) or DAILY_TRACKING_FILENAME
+    if daily_path and not _should_migrate_daily_path(daily_path, app_root):
+        daily_path = os.path.normpath(daily_path)
     else:
-        daily_name = DAILY_TRACKING_FILENAME
-    daily_path = os.path.normpath(os.path.join(output_folder, daily_name))
+        daily_name = os.path.basename(daily_path) or DAILY_TRACKING_FILENAME
+        daily_path = os.path.normpath(os.path.join(output_folder, daily_name))
 
     data["output_folder"] = output_folder
     data["daily_tracking_file"] = daily_path
@@ -384,15 +403,19 @@ class AppConfig:
 
         self.ensure_pad_bat_template()
 
-    def set_output_folder(self, folder: str) -> None:
+    def set_output_folder(self, folder: str, daily_tracking_file: str = "") -> None:
         """Đổi thư mục làm việc duy nhất và đồng bộ các khóa cấu hình liên quan."""
         folder = os.path.normpath(folder or default_output_folder(self.app_root))
         self.data["output_folder"] = folder
         self.data.pop("download_folder", None)
-        self.data["daily_tracking_file"] = os.path.join(
-            folder,
-            os.path.basename(self.daily_tracking_file) or DAILY_TRACKING_FILENAME,
-        )
+        if daily_tracking_file:
+            daily_path = daily_tracking_file
+        else:
+            daily_path = os.path.join(
+                folder,
+                os.path.basename(self.daily_tracking_file) or DAILY_TRACKING_FILENAME,
+            )
+        self.data["daily_tracking_file"] = os.path.normpath(daily_path)
 
     def ensure_pad_bat_template(self) -> bool:
         """Tạo sẵn file .bat mẫu cho luồng PAD RPA nếu chưa có.
