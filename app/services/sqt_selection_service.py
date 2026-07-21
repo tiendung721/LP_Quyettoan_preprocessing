@@ -49,6 +49,20 @@ class SelectionJsonWriteError(SqtSelectionError):
     pass
 
 
+class MultipleSheetsSelectedError(SqtSelectionError):
+    """SQT được chọn nằm ở nhiều sheet tháng khác nhau.
+
+    Luồng PAD nhập thông tin mở đúng một sheet mỗi lần chạy, nên khi các SQT trải
+    trên nhiều tháng, app chặn lại để người dùng chọn gọn trong một tháng.
+    """
+
+    def __init__(self, sheets: Iterable[str]):
+        self.sheets = sorted({str(s) for s in sheets if str(s).strip()})
+        super().__init__(
+            "Các Số quyết toán đang thuộc nhiều tháng: " + ", ".join(self.sheets)
+        )
+
+
 @dataclass(frozen=True)
 class SqtSelectionItem:
     value: str
@@ -182,6 +196,25 @@ def read_sqt_items(daily_file: str, sheet_name: str = INFO_SHEET) -> List[SqtSel
     finally:
         if wb is not None:
             wb.close()
+
+
+def resolve_selection_sheet(
+    default_sheet: str,
+    selected_items: Iterable[SqtSelectionItem] | None,
+) -> str:
+    """Tên sheet vật lý mà PAD sẽ mở cho lần nhập thông tin này.
+
+    File theo tháng đã gắn tên sheet thật vào từng item (vd "Tháng 7"); file một
+    sheet cũ để trống nên lấy ``default_sheet`` (``Thong_Tin_Quyet_Toan``). Nếu các
+    SQT được chọn nằm ở nhiều tháng thì báo ``MultipleSheetsSelectedError`` vì
+    luồng PAD chỉ nhập đúng một sheet mỗi lần chạy.
+    """
+    sheets = sorted(
+        {item.sheet_name for item in (selected_items or []) if item.sheet_name}
+    )
+    if len(sheets) > 1:
+        raise MultipleSheetsSelectedError(sheets)
+    return sheets[0] if sheets else default_sheet
 
 
 def write_selection_json(

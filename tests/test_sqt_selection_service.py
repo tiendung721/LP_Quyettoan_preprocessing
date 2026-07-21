@@ -13,8 +13,10 @@ from app.services.sqt_selection_service import (
     EXPENSE_SELECTION_OPERATION,
     MissingColumnError,
     MissingSheetError,
+    MultipleSheetsSelectedError,
     normalize_sqt_value,
     read_sqt_items,
+    resolve_selection_sheet,
     write_selection_json,
 )
 
@@ -141,6 +143,28 @@ class SqtSelectionServiceTests(unittest.TestCase):
                 {"sqt": "717", "sheet_name": "Tháng 8", "row_numbers": [2]},
             ],
         )
+
+    def test_resolve_selection_sheet_uses_month_sheet(self) -> None:
+        self._make_monthly_daily()
+        items = read_sqt_items(str(self.daily))
+        july = [item for item in items if item.value == "716"]
+
+        self.assertEqual(resolve_selection_sheet(INFO_SHEET, july), "Tháng 7")
+
+    def test_resolve_selection_sheet_falls_back_to_default(self) -> None:
+        self._make_daily([596, 597])
+        items = read_sqt_items(str(self.daily))
+
+        self.assertEqual(resolve_selection_sheet(INFO_SHEET, items), INFO_SHEET)
+        self.assertEqual(resolve_selection_sheet(INFO_SHEET, None), INFO_SHEET)
+
+    def test_resolve_selection_sheet_rejects_multiple_months(self) -> None:
+        self._make_monthly_daily()
+        items = read_sqt_items(str(self.daily))
+
+        with self.assertRaises(MultipleSheetsSelectedError) as ctx:
+            resolve_selection_sheet(INFO_SHEET, items)
+        self.assertEqual(ctx.exception.sheets, ["Tháng 7", "Tháng 8"])
 
     def test_write_selection_json_supports_expense_operation(self) -> None:
         target = self.root / "runtime" / "rpa_input_selection.json"

@@ -65,10 +65,12 @@ from .services.sqt_selection_service import (
     EXPENSE_SELECTION_OPERATION,
     MissingColumnError,
     MissingSheetError,
+    MultipleSheetsSelectedError,
     SelectionJsonWriteError,
     SELECTION_OPERATION,
     SqtSelectionError,
     read_sqt_items,
+    resolve_selection_sheet,
     write_selection_json,
 )
 from .watcher import OutputWatcher
@@ -1749,12 +1751,32 @@ class MainWindow(QMainWindow):
             dialog.selected_items() if operation == SELECTION_OPERATION else None
         )
 
+        # File theo tháng có nhiều sheet "Tháng N"; luồng PAD chỉ mở đúng một sheet
+        # mỗi lần chạy, nên ghi đúng tên sheet tháng vào JSON và chặn khi các SQT
+        # được chọn trải trên nhiều tháng.
+        try:
+            effective_sheet_name = resolve_selection_sheet(sheet_name, selected_items)
+        except MultipleSheetsSelectedError as exc:
+            self.logger.warning(
+                "SQT được chọn thuộc nhiều tháng (%s); không chạy RPA %s.",
+                ", ".join(exc.sheets),
+                action_label,
+            )
+            self.show_warning(
+                "Chọn trong cùng một tháng",
+                "Các Số quyết toán bạn chọn đang nằm ở nhiều tháng khác nhau ("
+                + ", ".join(exc.sheets)
+                + ").\n\nLuồng RPA nhập thông tin xử lý mỗi lần một tháng. Vui lòng "
+                "chỉ chọn các Số quyết toán trong cùng một tháng rồi chạy lại.",
+            )
+            return
+
         try:
             json_path = write_selection_json(
                 self.config.rpa_input_selection_path,
                 daily_path,
                 selected_sqt,
-                sheet_name=sheet_name,
+                sheet_name=effective_sheet_name,
                 operation=operation,
                 selected_items=selected_items,
             )
@@ -1764,6 +1786,7 @@ class MainWindow(QMainWindow):
             return
 
         self.logger.info("Danh sách SQT đã chọn: %s", selected_sqt)
+        self.logger.info("Sheet đích ghi vào JSON cho PAD: %s", effective_sheet_name)
         self.logger.info("Đã tạo JSON lựa chọn RPA: %s", json_path)
         self.logger.info("File Excel hằng ngày dùng cho PAD: %s", os.path.abspath(daily_path))
 

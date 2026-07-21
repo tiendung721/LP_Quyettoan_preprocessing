@@ -6,7 +6,7 @@
   "pad_input_information_bat_path": "C:\\Users\\Admin\\Desktop\\test\\quyettoan_pm_project\\Launcher\\run_input_information.bat",
   "pad_input_expense_bat_path": "C:\\Users\\Admin\\Desktop\\test\\quyettoan_pm_project\\Launcher\\run_input_expense.bat",
   "output_folder": "C:\\Users\\Admin\\Desktop\\test\\quyettoan_pm_project\\output",
-  "daily_tracking_file": "C:\\Users\\Admin\\Downloads\\Hàng ngày 2026 (1).xlsx",
+  "daily_tracking_file": "C:\\Users\\Admin\\Desktop\\test\\quyettoan_pm_project\\output\\Hàng ngày 2026.xlsx",
   "allowed_extensions": [
     ".json"
   ],
